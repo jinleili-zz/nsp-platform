@@ -2,6 +2,14 @@
 
 基于 `nsp-common/pkg/logger` 封装的 HTTP 应用示例，演示如何在 HTTP 服务中集成分布式追踪日志。
 
+## 新增功能：AK/SK 认证模块
+
+本项目已集成 `nsp-common/pkg/auth` 提供的统一 AK/SK 认证模块，支持：
+- HMAC-SHA256 请求签名
+- 时间戳防重放（±5分钟容忍窗口）
+- Nonce 一次性校验
+- Gin 中间件集成
+
 ## 项目结构
 
 ```
@@ -14,17 +22,35 @@ nsp-demo/
 │   │   ├── handler.go        # HTTP 请求处理器
 │   │   └── handler_test.go   # 处理器测试
 │   └── middleware/
-│       ├── trace.go          # 分布式追踪中间件
+│       ├── trace.go          # 分布式追踪中间件 (支持 net/http 和 Gin)
 │       ├── logger.go         # 日志中间件
 │       ├── recovery.go       # Panic 恢复中间件
 │       └── middleware_test.go # 中间件测试
 ├── go.mod
 └── README.md
+
+nsp-common/
+└── pkg/
+    ├── auth/                 # AK/SK 认证模块
+    │   ├── store.go          # 凭证存储接口 + 内存实现
+    │   ├── nonce.go          # Nonce 防重放接口 + 内存实现
+    │   ├── aksk.go           # 签名/验证核心逻辑
+    │   ├── middleware.go     # Gin 中间件适配层
+    │   └── auth_test.go      # 单元测试
+    └── logger/               # 日志模块
+        └── ...
 ```
 
 ## 功能特性
 
-### 1. 分布式追踪支持
+### 1. AK/SK 认证支持
+
+- **HMAC-SHA256 签名**: 基于请求头、URI、Query、Body 计算签名
+- **时间戳防重放**: ±5分钟容忍窗口，防止重放攻击
+- **Nonce 一次性校验**: 16字节随机 hex，15分钟有效期
+- **Gin 中间件集成**: 支持 Skipper 豁免、自定义错误处理
+
+### 2. 分布式追踪支持
 
 - **自动生成 Trace ID**: 每个请求自动生成唯一的 trace_id (32 位十六进制)
 - **自动生成 Span ID**: 每个请求自动生成唯一的 span_id (16 位十六进制)
@@ -327,3 +353,192 @@ logger.FieldPeerAddr   // "peer_addr"
 | `LocalTime` | true | 文件名使用本地时间 |
 
 轮转后的文件命名格式：`app-2026-02-26T15-04-05.000.log.gz`
+
+---
+
+## AK/SK 认证模块使用指南
+
+### 快速开始
+
+#### 1. 服务端配置（Gin 中间件）
+
+```go
+package main
+
+import (
+    "github.com/gin-gonic/gin"
+    "nsp-common/pkg/auth"
+)
+
+func main() {
+    // 创建凭证存储
+    store := auth.NewMemoryStore([]*auth.Credential{
+        {
+            AccessKey: "AK1234567890",
+            SecretKey: "SK1234567890abcdef",
+            Label:     "demo-client",
+            Enabled:   true,
+        },
+    })
+    
+    // 创建 Nonce 存储
+    nonces := auth.NewMemoryNonceStore()
+    
+    // 创建验证器
+    verifier := auth.NewVerifier(store, nonces, nil)
+    
+    // 配置中间件
+    r := gin.Default()
+    
+    // 全局认证（可配置 Skipper 跳过特定路径）
+    r.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+        Skipper: auth.NewSkipperByPath("/health", "/public/*"),
+    }))
+    
+    // 获取认证凭证
+    r.GET("/api/user", func(c *gin.Context) {
+        cred, ok := auth.CredentialFromGin(c)
+        if ok {
+            // 使用 cred.AccessKey 进行权限控制
+        }
+    })
+}
+```
+
+#### 2. 客户端签名（Go）
+
+```go
+import (
+    "net/http"
+    "nsp-common/pkg/auth"
+)
+
+func callAPI() error {
+    signer := auth.NewSigner("AK1234567890", "SK1234567890abcdef")
+    
+    req, _ := http.NewRequest("POST", "https://api.example.com/user", body)
+    req.Header.Set("Content-Type", "application/json")
+    
+    // 自动填充所有认证头并签名
+    if err := signer.Sign(req); err != nil {
+        return err
+    }
+    
+    resp, err := http.DefaultClient.Do(req)
+    // ...
+}
+```
+
+#### 3. 客户端签名（Python 示例）
+
+```python
+import hmac
+import hashlib
+import time
+import secrets
+
+def sign_request(method, uri, query, headers, body, ak, sk):
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    
+    # 构造 StringToSign
+    canonical_headers = f"content-type:{headers.get('Content-Type', '')}\n"
+    canonical_headers += f"x-nsp-nonce:{nonce}\n"
+    canonical_headers += f"x-nsp-timestamp:{timestamp}\n"
+    
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    signed_headers = "content-type;x-nsp-nonce;x-nsp-timestamp"
+    
+    string_to_sign = f"{method.upper()}\n{uri}\n{query}\n{canonical_headers}\n{signed_headers}\n{body_hash}"
+    
+    signature = hmac.new(
+        sk.encode(),
+        string_to_sign.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    
+    return {
+        "Authorization": f"NSP-HMAC-SHA256 AK={ak}, Signature={signature}",
+        "X-NSP-Timestamp": timestamp,
+        "X-NSP-Nonce": nonce,
+        "X-NSP-SignedHeaders": signed_headers,
+    }
+```
+
+### 请求头规范
+
+| Header | 说明 | 示例 |
+|--------|------|------|
+| `Authorization` | 认证头 | `NSP-HMAC-SHA256 AK=xxx, Signature=xxx` |
+| `X-NSP-Timestamp` | Unix 秒级时间戳 | `1709049600` |
+| `X-NSP-Nonce` | 16字节随机 hex | `a1b2c3d4e5f67890` |
+| `X-NSP-SignedHeaders` | 参与签名的请求头 | `content-type;x-nsp-nonce;x-nsp-timestamp` |
+
+### 签名字符串构造（StringToSign）
+
+```
+POST
+/api/v1/users
+page=1&size=10
+content-type:application/json
+x-nsp-nonce:a1b2c3d4e5f67890
+x-nsp-timestamp:1709049600
+
+content-type;x-nsp-nonce;x-nsp-timestamp
+<hex(SHA256(body))>
+```
+
+### 错误码映射
+
+| 错误 | HTTP 状态码 | 说明 |
+|------|-------------|------|
+| `ErrMissingAuthHeader` | 400 | Authorization 头缺失 |
+| `ErrInvalidAuthFormat` | 400 | Authorization 格式错误 |
+| `ErrMissingTimestamp` | 400 | 时间戳缺失或格式错误 |
+| `ErrMissingNonce` | 400 | Nonce 缺失 |
+| `ErrTimestampExpired` | 401 | 时间戳超出容忍窗口 |
+| `ErrNonceReused` | 401 | Nonce 已被使用 |
+| `ErrAKNotFound` | 401 | AK 不存在或已禁用 |
+| `ErrSignatureMismatch` | 401 | 签名不匹配 |
+
+### 高级配置
+
+#### 自定义时间戳容忍窗口
+
+```go
+cfg := &auth.VerifierConfig{
+    TimestampTolerance: 10 * time.Minute,  // 10分钟容忍
+    NonceTTL:           30 * time.Minute,  // Nonce 30分钟有效期
+}
+verifier := auth.NewVerifier(store, nonces, cfg)
+```
+
+#### 自定义认证失败响应
+
+```go
+r.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+    OnAuthFailed: func(c *gin.Context, err error) {
+        c.JSON(401, gin.H{
+            "code": "AUTH_FAILED",
+            "message": err.Error(),
+        })
+        c.Abort()
+    },
+}))
+```
+
+#### 路径前缀豁免
+
+```go
+// 跳过 /public/ 和 /health 路径
+r.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+    Skipper: auth.NewSkipperByPathPrefix("/public/", "/health"),
+}))
+```
+
+### 生产环境建议
+
+1. **凭证存储**: 使用数据库或 Redis 实现 `CredentialStore` 接口
+2. **Nonce 存储**: 使用 Redis 实现 `NonceStore` 接口，支持分布式部署
+3. **密钥轮换**: 定期更新 SecretKey，支持新旧密钥同时生效的过渡期
+4. **日志审计**: 记录所有认证失败请求，用于安全分析
