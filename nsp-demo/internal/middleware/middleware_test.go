@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 func init() {
@@ -26,8 +27,8 @@ func init() {
 }
 
 func TestGenerateTraceID(t *testing.T) {
-	id1 := GenerateTraceID()
-	id2 := GenerateTraceID()
+	id1 := trace.NewTraceID()
+	id2 := trace.NewTraceID()
 
 	// Should be 32 hex characters (16 bytes)
 	if len(id1) != 32 {
@@ -41,8 +42,8 @@ func TestGenerateTraceID(t *testing.T) {
 }
 
 func TestGenerateSpanID(t *testing.T) {
-	id1 := GenerateSpanID()
-	id2 := GenerateSpanID()
+	id1 := trace.NewSpanId()
+	id2 := trace.NewSpanId()
 
 	// Should be 16 hex characters (8 bytes)
 	if len(id1) != 16 {
@@ -55,60 +56,13 @@ func TestGenerateSpanID(t *testing.T) {
 	}
 }
 
-// Tests for net/http version
-func TestTraceMiddleware(t *testing.T) {
-	handler := Trace(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify trace_id and span_id are in context
-		traceID := logger.TraceIDFromContext(r.Context())
-		spanID := logger.SpanIDFromContext(r.Context())
-
-		if traceID == "" {
-			t.Error("trace_id should be set in context")
-		}
-		if spanID == "" {
-			t.Error("span_id should be set in context")
-		}
-
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	t.Run("generates trace ID when not provided", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/test", nil)
-		rec := httptest.NewRecorder()
-
-		handler.ServeHTTP(rec, req)
-
-		// Check response headers
-		traceID := rec.Header().Get(HeaderTraceID)
-		spanID := rec.Header().Get(HeaderSpanID)
-
-		if traceID == "" {
-			t.Error("X-Trace-ID header should be set")
-		}
-		if spanID == "" {
-			t.Error("X-Span-ID header should be set")
-		}
-	})
-
-	t.Run("uses provided trace ID", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set(HeaderTraceID, "provided-trace-id-12345")
-		rec := httptest.NewRecorder()
-
-		handler.ServeHTTP(rec, req)
-
-		traceID := rec.Header().Get(HeaderTraceID)
-		if traceID != "provided-trace-id-12345" {
-			t.Errorf("expected provided trace ID, got %s", traceID)
-		}
-	})
-}
-
-// Tests for Gin version
+// Tests for Gin TraceMiddleware
 func TestGinTraceMiddleware(t *testing.T) {
+	instanceId := "test-instance"
+
 	t.Run("generates trace ID when not provided", func(t *testing.T) {
 		r := gin.New()
-		r.Use(GinTrace())
+		r.Use(trace.TraceMiddleware(instanceId))
 		r.GET("/test", func(c *gin.Context) {
 			traceID := logger.TraceIDFromContext(c.Request.Context())
 			spanID := logger.SpanIDFromContext(c.Request.Context())
@@ -127,33 +81,104 @@ func TestGinTraceMiddleware(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 
-		traceID := rec.Header().Get(HeaderTraceID)
-		spanID := rec.Header().Get(HeaderSpanID)
+		// Check B3 response headers
+		traceID := rec.Header().Get(trace.HeaderTraceID)
+		requestID := rec.Header().Get(trace.HeaderRequestID)
 
 		if traceID == "" {
-			t.Error("X-Trace-ID header should be set")
+			t.Error("X-B3-TraceId header should be set")
 		}
-		if spanID == "" {
-			t.Error("X-Span-ID header should be set")
+		if requestID == "" {
+			t.Error("X-Request-Id header should be set")
+		}
+		// X-Request-Id should equal TraceID for compatibility
+		if requestID != traceID {
+			t.Errorf("X-Request-Id should equal X-B3-TraceId, got %s vs %s", requestID, traceID)
 		}
 	})
 
-	t.Run("uses provided trace ID", func(t *testing.T) {
+	t.Run("uses provided B3 trace ID", func(t *testing.T) {
 		r := gin.New()
-		r.Use(GinTrace())
+		r.Use(trace.TraceMiddleware(instanceId))
 		r.GET("/test", func(c *gin.Context) {
 			c.Status(http.StatusOK)
 		})
 
 		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set(HeaderTraceID, "provided-trace-id-12345")
+		// Use valid 32-char hex string for TraceID
+		req.Header.Set(trace.HeaderTraceID, "abcdef1234567890abcdef1234567890")
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 
-		traceID := rec.Header().Get(HeaderTraceID)
-		if traceID != "provided-trace-id-12345" {
+		traceID := rec.Header().Get(trace.HeaderTraceID)
+		if traceID != "abcdef1234567890abcdef1234567890" {
 			t.Errorf("expected provided trace ID, got %s", traceID)
 		}
+	})
+
+	t.Run("uses X-Request-Id as fallback for trace ID", func(t *testing.T) {
+		r := gin.New()
+		r.Use(trace.TraceMiddleware(instanceId))
+		r.GET("/test", func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set(trace.HeaderRequestID, "request-id-fallback-12345")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		traceID := rec.Header().Get(trace.HeaderTraceID)
+		if traceID != "request-id-fallback-12345" {
+			t.Errorf("expected X-Request-Id as trace ID, got %s", traceID)
+		}
+	})
+
+	t.Run("TraceFromGin returns TraceContext", func(t *testing.T) {
+		r := gin.New()
+		r.Use(trace.TraceMiddleware(instanceId))
+		r.GET("/test", func(c *gin.Context) {
+			tc, ok := trace.TraceFromGin(c)
+			if !ok {
+				t.Error("TraceFromGin should return TraceContext")
+			}
+			if tc == nil {
+				t.Error("TraceContext should not be nil")
+			}
+			if tc.TraceID == "" {
+				t.Error("TraceID should not be empty")
+			}
+			if tc.SpanId == "" {
+				t.Error("SpanId should not be empty")
+			}
+			if tc.InstanceId != instanceId {
+				t.Errorf("expected InstanceId %s, got %s", instanceId, tc.InstanceId)
+			}
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+	})
+
+	t.Run("ParentSpanId is set from upstream X-B3-SpanId", func(t *testing.T) {
+		r := gin.New()
+		r.Use(trace.TraceMiddleware(instanceId))
+		r.GET("/test", func(c *gin.Context) {
+			tc, _ := trace.TraceFromGin(c)
+			// Use valid 16-char hex string for SpanId
+			if tc.ParentSpanId != "1234567890abcdef" {
+				t.Errorf("expected ParentSpanId from upstream, got %s", tc.ParentSpanId)
+			}
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set(trace.HeaderTraceID, "abcdef1234567890abcdef1234567890")
+		req.Header.Set(trace.HeaderSpanId, "1234567890abcdef")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
 	})
 }
 
@@ -185,8 +210,10 @@ func TestLoggerMiddleware(t *testing.T) {
 
 // Tests for Gin Logger middleware
 func TestGinLoggerMiddleware(t *testing.T) {
+	instanceId := "test-instance"
+
 	r := gin.New()
-	r.Use(GinTrace())
+	r.Use(trace.TraceMiddleware(instanceId))
 	r.Use(GinLogger())
 
 	called := false
@@ -229,8 +256,10 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 // Tests for Gin Recovery middleware
 func TestGinRecoveryMiddleware(t *testing.T) {
+	instanceId := "test-instance"
+
 	r := gin.New()
-	r.Use(GinTrace())
+	r.Use(trace.TraceMiddleware(instanceId))
 	r.Use(GinRecovery())
 	r.GET("/panic", func(c *gin.Context) {
 		panic("test panic")

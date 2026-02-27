@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/auth"
 	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/yourorg/nsp-common/pkg/trace"
 	"github.com/yourorg/nsp-demo/internal/handler"
 	"github.com/yourorg/nsp-demo/internal/middleware"
 )
@@ -50,6 +51,9 @@ func main() {
 	// Create Gin engine without default middleware
 	r := gin.New()
 
+	// Get instance ID for trace middleware (typically k8s pod name from HOSTNAME)
+	instanceId := trace.GetInstanceId()
+
 	// Setup AK/SK authentication
 	credStore := auth.NewMemoryStore([]*auth.Credential{
 		{
@@ -71,8 +75,8 @@ func main() {
 	// Apply middleware (order matters)
 	// 1. Recovery - catch panics
 	r.Use(middleware.GinRecovery())
-	// 2. Trace - inject trace_id and span_id
-	r.Use(middleware.GinTrace())
+	// 2. Trace - inject trace_id and span_id (using new B3 standard trace module)
+	r.Use(trace.TraceMiddleware(instanceId))
 	// 3. Logger - log requests
 	r.Use(middleware.GinLogger())
 	// 4. AK/SK Auth - authenticate requests (skip health endpoint)
