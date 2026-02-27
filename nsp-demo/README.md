@@ -1,28 +1,29 @@
 # NSP-Demo HTTP Application
 
-基于 `nsp-common/pkg/logger` 封装的 HTTP 应用示例，演示如何在 HTTP 服务中集成分布式追踪日志。
+基于 **Gin** 框架和 `nsp-common` 公共库的 HTTP 应用示例，集成了分布式追踪日志和 AK/SK 认证功能。
 
-## 新增功能：AK/SK 认证模块
+## 核心特性
 
-本项目已集成 `nsp-common/pkg/auth` 提供的统一 AK/SK 认证模块，支持：
-- HMAC-SHA256 请求签名
-- 时间戳防重放（±5分钟容忍窗口）
-- Nonce 一次性校验
-- Gin 中间件集成
+- **Gin 框架**: 高性能 HTTP 框架
+- **AK/SK 认证**: HMAC-SHA256 签名 + 时间戳/Nonce 防重放
+- **分布式追踪**: 自动生成/透传 trace_id 和 span_id
+- **结构化日志**: JSON 格式，支持多路输出和日志轮转
 
 ## 项目结构
 
 ```
 nsp-demo/
 ├── cmd/
-│   └── server/
-│       └── main.go           # HTTP 服务入口
+│   ├── server/
+│   │   └── main.go           # HTTP 服务入口 (Gin)
+│   └── testclient/
+│       └── main.go           # AK/SK 认证测试客户端
 ├── internal/
 │   ├── handler/
-│   │   ├── handler.go        # HTTP 请求处理器
+│   │   ├── handler.go        # Gin 请求处理器
 │   │   └── handler_test.go   # 处理器测试
 │   └── middleware/
-│       ├── trace.go          # 分布式追踪中间件 (支持 net/http 和 Gin)
+│       ├── trace.go          # 分布式追踪中间件
 │       ├── logger.go         # 日志中间件
 │       ├── recovery.go       # Panic 恢复中间件
 │       └── middleware_test.go # 中间件测试
@@ -57,7 +58,7 @@ nsp-common/
 - **透传 Trace ID**: 支持通过 `X-Trace-ID` Header 传入上游 trace_id
 - **响应头返回**: 在响应头中返回 `X-Trace-ID` 和 `X-Span-ID`
 
-### 2. 结构化日志输出
+### 3. 结构化日志输出
 
 每条日志自动包含：
 - `service`: 服务名称
@@ -67,19 +68,19 @@ nsp-common/
 - `level`: 日志级别
 - `caller`: 调用位置（文件名:行号）
 
-### 3. HTTP 请求日志
+### 4. HTTP 请求日志
 
 自动记录每个请求的：
 - 请求开始：method, path, peer_addr
 - 请求完成：method, path, code, latency_ms, response_size
 
-### 4. 多路输出支持
+### 5. 多路输出支持
 
 - **控制台输出**: 人可读格式，适合开发调试
 - **文件输出**: JSON 格式，适合日志聚合系统
 - **独立配置**: 每个输出可配置独立的格式、级别和轮转策略
 
-### 5. 日志文件分片 (基于 Lumberjack)
+### 6. 日志文件分片 (基于 Lumberjack)
 
 - **按大小切割**: 达到指定大小自动切割
 - **保留策略**: 可配置保留文件数量和天数
@@ -234,16 +235,16 @@ cfg := &logger.Config{
 
 ## 核心代码说明
 
-### 1. Trace 中间件
+### 1. Trace 中间件 (Gin)
 
 ```go
 // middleware/trace.go
-func Trace(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        ctx := r.Context()
+func GinTrace() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        ctx := c.Request.Context()
 
         // 从请求头获取或生成 trace_id
-        traceID := r.Header.Get(HeaderTraceID)
+        traceID := c.GetHeader(HeaderTraceID)
         if traceID == "" {
             traceID = GenerateTraceID()
         }
@@ -254,11 +255,13 @@ func Trace(next http.Handler) http.Handler {
         ctx = logger.ContextWithSpanID(ctx, spanID)
 
         // 设置响应头
-        w.Header().Set(HeaderTraceID, traceID)
-        w.Header().Set(HeaderSpanID, spanID)
+        c.Header(HeaderTraceID, traceID)
+        c.Header(HeaderSpanID, spanID)
 
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
+        // 更新请求 context
+        c.Request = c.Request.WithContext(ctx)
+        c.Next()
+    }
 }
 ```
 
@@ -266,31 +269,45 @@ func Trace(next http.Handler) http.Handler {
 
 ```go
 // handler/handler.go
-func User(w http.ResponseWriter, r *http.Request) {
-    userID := r.URL.Query().Get("id")
+func User(c *gin.Context) {
+    ctx := c.Request.Context()
+    userID := c.Query("id")
     
     // 方式1: 使用全局函数，自动从 context 提取 trace_id/span_id
-    logger.InfoContext(r.Context(), "processing request", "user_id", userID)
+    logger.InfoContext(ctx, "processing request", "user_id", userID)
     
     // 方式2: 创建带有固定字段的子 logger
-    log := logger.GetLogger().WithContext(r.Context()).With(
+    log := logger.GetLogger().WithContext(ctx).With(
         logger.FieldUserID, userID,
         logger.FieldModule, "user-handler",
     )
     log.Info("fetching user from database")
-    log.Info("user fetched successfully")
+    
+    // 获取认证凭证
+    if cred, ok := auth.CredentialFromGin(c); ok {
+        log.Info("request from client", "client", cred.Label)
+    }
 }
 ```
 
-### 3. 中间件链配置
+### 3. 中间件链配置 (Gin)
 
 ```go
 // cmd/server/main.go
-// 中间件顺序: Recovery -> Trace -> Logger -> Handler
-var h http.Handler = mux
-h = middleware.Logger(h)   // 记录请求日志
-h = middleware.Trace(h)    // 注入追踪 ID
-h = middleware.Recovery(h) // 捕获 panic
+r := gin.New()
+
+// 中间件顺序: Recovery -> Trace -> Logger -> Auth -> Handler
+r.Use(middleware.GinRecovery())  // 捕获 panic
+r.Use(middleware.GinTrace())     // 注入追踪 ID
+r.Use(middleware.GinLogger())    // 记录请求日志
+r.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+    Skipper: auth.NewSkipperByPath("/health"),  // 健康检查无需认证
+}))
+
+// 注册路由
+r.GET("/health", handler.Health)
+r.GET("/hello", handler.Hello)
+r.GET("/user", handler.User)
 ```
 
 ## 运行测试
@@ -302,9 +319,29 @@ go test -v ./...
 
 测试覆盖：
 - Trace ID / Span ID 生成
-- 中间件功能验证
+- Gin 中间件功能验证
 - Handler 响应验证
 - Panic 恢复验证
+- AK/SK 认证流程
+
+## 使用测试客户端
+
+项目提供了测试客户端用于验证 AK/SK 认证：
+
+```bash
+# 启动服务
+go run ./cmd/server/main.go -dev
+
+# 另一个终端运行测试客户端
+go run ./cmd/testclient/main.go
+```
+
+预置测试凭证：
+
+| AK | SK | Label |
+|----|----|----|
+| `test-ak` | `test-sk-1234567890abcdef` | test-client |
+| `demo-ak` | `demo-sk-abcdef1234567890` | demo-client |
 
 ## 与上游服务集成
 

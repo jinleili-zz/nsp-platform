@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 // responseWriter wraps http.ResponseWriter to capture status code.
+// This is used for the standard net/http middleware.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -29,6 +31,7 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 }
 
 // Logger is a middleware that logs HTTP requests with trace context.
+// This is the net/http version for standard HTTP handlers.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -61,4 +64,50 @@ func Logger(next http.Handler) http.Handler {
 			"response_size", wrapped.written,
 		)
 	})
+}
+
+// GinLogger is a Gin middleware that logs HTTP requests with trace context.
+// This is the Gin version for Gin-based applications.
+func GinLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		query := c.Request.URL.RawQuery
+
+		// Log incoming request
+		logger.InfoContext(c.Request.Context(), "request started",
+			logger.FieldMethod, c.Request.Method,
+			logger.FieldPath, path,
+			logger.FieldPeerAddr, c.ClientIP(),
+		)
+
+		// Process request
+		c.Next()
+
+		// Calculate latency
+		latency := time.Since(start)
+
+		// Build log fields
+		fields := []interface{}{
+			logger.FieldMethod, c.Request.Method,
+			logger.FieldPath, path,
+			logger.FieldCode, c.Writer.Status(),
+			logger.FieldLatencyMS, latency.Milliseconds(),
+			"response_size", c.Writer.Size(),
+		}
+
+		if query != "" {
+			fields = append(fields, "query", query)
+		}
+
+		// Log based on status code
+		status := c.Writer.Status()
+		if status >= 500 {
+			logger.ErrorContext(c.Request.Context(), "request completed", fields...)
+		} else if status >= 400 {
+			logger.WarnContext(c.Request.Context(), "request completed", fields...)
+		} else {
+			logger.InfoContext(c.Request.Context(), "request completed", fields...)
+		}
+	}
 }

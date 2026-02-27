@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
@@ -19,22 +20,34 @@ func init() {
 		EnableCaller: false,
 	}
 	logger.Init(cfg)
+
+	// Set Gin to test mode
+	gin.SetMode(gin.TestMode)
 }
 
-func makeRequest(t *testing.T, method, path string) (*httptest.ResponseRecorder, *http.Request) {
+func setupRouter() *gin.Engine {
+	r := gin.New()
+	return r
+}
+
+func makeGinRequest(t *testing.T, r *gin.Engine, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	// Add trace context
 	ctx := logger.ContextWithTraceID(req.Context(), "test-trace-123")
 	ctx = logger.ContextWithSpanID(ctx, "test-span-456")
 	req = req.WithContext(ctx)
-	return httptest.NewRecorder(), req
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestHealth(t *testing.T) {
-	rec, req := makeRequest(t, "GET", "/health")
+	r := setupRouter()
+	r.GET("/health", Health)
 
-	Health(rec, req)
+	rec := makeGinRequest(t, r, "GET", "/health")
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", rec.Code)
@@ -58,9 +71,10 @@ func TestHealth(t *testing.T) {
 
 func TestHello(t *testing.T) {
 	t.Run("without name parameter", func(t *testing.T) {
-		rec, req := makeRequest(t, "GET", "/hello")
+		r := setupRouter()
+		r.GET("/hello", Hello)
 
-		Hello(rec, req)
+		rec := makeGinRequest(t, r, "GET", "/hello")
 
 		if rec.Code != http.StatusOK {
 			t.Errorf("expected status 200, got %d", rec.Code)
@@ -77,9 +91,10 @@ func TestHello(t *testing.T) {
 	})
 
 	t.Run("with name parameter", func(t *testing.T) {
-		rec, req := makeRequest(t, "GET", "/hello?name=Alice")
+		r := setupRouter()
+		r.GET("/hello", Hello)
 
-		Hello(rec, req)
+		rec := makeGinRequest(t, r, "GET", "/hello?name=Alice")
 
 		var resp Response
 		json.NewDecoder(rec.Body).Decode(&resp)
@@ -92,9 +107,10 @@ func TestHello(t *testing.T) {
 
 func TestUser(t *testing.T) {
 	t.Run("without user id", func(t *testing.T) {
-		rec, req := makeRequest(t, "GET", "/user")
+		r := setupRouter()
+		r.GET("/user", User)
 
-		User(rec, req)
+		rec := makeGinRequest(t, r, "GET", "/user")
 
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("expected status 400, got %d", rec.Code)
@@ -109,9 +125,10 @@ func TestUser(t *testing.T) {
 	})
 
 	t.Run("with user id", func(t *testing.T) {
-		rec, req := makeRequest(t, "GET", "/user?id=123")
+		r := setupRouter()
+		r.GET("/user", User)
 
-		User(rec, req)
+		rec := makeGinRequest(t, r, "GET", "/user?id=123")
 
 		if rec.Code != http.StatusOK {
 			t.Errorf("expected status 200, got %d", rec.Code)
@@ -138,9 +155,10 @@ func TestUser(t *testing.T) {
 }
 
 func TestError(t *testing.T) {
-	rec, req := makeRequest(t, "GET", "/error")
+	r := setupRouter()
+	r.GET("/error", Error)
 
-	Error(rec, req)
+	rec := makeGinRequest(t, r, "GET", "/error")
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected status 500, got %d", rec.Code)
@@ -155,7 +173,8 @@ func TestError(t *testing.T) {
 }
 
 func TestPanic(t *testing.T) {
-	rec, req := makeRequest(t, "GET", "/panic")
+	r := setupRouter()
+	r.GET("/panic", Panic)
 
 	defer func() {
 		if r := recover(); r == nil {
@@ -163,35 +182,5 @@ func TestPanic(t *testing.T) {
 		}
 	}()
 
-	Panic(rec, req)
-}
-
-func TestWriteJSON(t *testing.T) {
-	rec := httptest.NewRecorder()
-
-	resp := Response{
-		Code:    0,
-		Message: "test",
-		Data:    map[string]string{"key": "value"},
-	}
-
-	writeJSON(rec, http.StatusOK, resp)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
-	}
-
-	contentType := rec.Header().Get("Content-Type")
-	if contentType != "application/json" {
-		t.Errorf("expected Content-Type 'application/json', got %s", contentType)
-	}
-
-	var decoded Response
-	if err := json.NewDecoder(rec.Body).Decode(&decoded); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-
-	if decoded.Message != "test" {
-		t.Errorf("expected message 'test', got %s", decoded.Message)
-	}
+	makeGinRequest(t, r, "GET", "/panic")
 }

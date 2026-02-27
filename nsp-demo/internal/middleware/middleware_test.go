@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
@@ -18,6 +20,9 @@ func init() {
 		EnableCaller: false,
 	}
 	logger.Init(cfg)
+
+	// Set Gin to test mode
+	gin.SetMode(gin.TestMode)
 }
 
 func TestGenerateTraceID(t *testing.T) {
@@ -50,6 +55,7 @@ func TestGenerateSpanID(t *testing.T) {
 	}
 }
 
+// Tests for net/http version
 func TestTraceMiddleware(t *testing.T) {
 	handler := Trace(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify trace_id and span_id are in context
@@ -98,6 +104,60 @@ func TestTraceMiddleware(t *testing.T) {
 	})
 }
 
+// Tests for Gin version
+func TestGinTraceMiddleware(t *testing.T) {
+	t.Run("generates trace ID when not provided", func(t *testing.T) {
+		r := gin.New()
+		r.Use(GinTrace())
+		r.GET("/test", func(c *gin.Context) {
+			traceID := logger.TraceIDFromContext(c.Request.Context())
+			spanID := logger.SpanIDFromContext(c.Request.Context())
+
+			if traceID == "" {
+				t.Error("trace_id should be set in context")
+			}
+			if spanID == "" {
+				t.Error("span_id should be set in context")
+			}
+
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		traceID := rec.Header().Get(HeaderTraceID)
+		spanID := rec.Header().Get(HeaderSpanID)
+
+		if traceID == "" {
+			t.Error("X-Trace-ID header should be set")
+		}
+		if spanID == "" {
+			t.Error("X-Span-ID header should be set")
+		}
+	})
+
+	t.Run("uses provided trace ID", func(t *testing.T) {
+		r := gin.New()
+		r.Use(GinTrace())
+		r.GET("/test", func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		})
+
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set(HeaderTraceID, "provided-trace-id-12345")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		traceID := rec.Header().Get(HeaderTraceID)
+		if traceID != "provided-trace-id-12345" {
+			t.Errorf("expected provided trace ID, got %s", traceID)
+		}
+	})
+}
+
+// Tests for net/http Logger middleware
 func TestLoggerMiddleware(t *testing.T) {
 	called := false
 	handler := Logger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +183,31 @@ func TestLoggerMiddleware(t *testing.T) {
 	}
 }
 
+// Tests for Gin Logger middleware
+func TestGinLoggerMiddleware(t *testing.T) {
+	r := gin.New()
+	r.Use(GinTrace())
+	r.Use(GinLogger())
+
+	called := false
+	r.GET("/test", func(c *gin.Context) {
+		called = true
+		c.String(http.StatusOK, "OK")
+	})
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if !called {
+		t.Error("handler should be called")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+}
+
+// Tests for net/http Recovery middleware
 func TestRecoveryMiddleware(t *testing.T) {
 	handler := Recovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("test panic")
@@ -139,6 +224,39 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("expected status 500, got %d", rec.Code)
+	}
+}
+
+// Tests for Gin Recovery middleware
+func TestGinRecoveryMiddleware(t *testing.T) {
+	r := gin.New()
+	r.Use(GinTrace())
+	r.Use(GinRecovery())
+	r.GET("/panic", func(c *gin.Context) {
+		panic("test panic")
+	})
+
+	req := httptest.NewRequest("GET", "/panic", nil)
+	rec := httptest.NewRecorder()
+
+	// Should not panic
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 500, got %d", rec.Code)
+	}
+
+	// Check response body
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp["code"] != float64(500) {
+		t.Errorf("expected code 500, got %v", resp["code"])
+	}
+	if resp["message"] != "Internal Server Error" {
+		t.Errorf("expected message 'Internal Server Error', got %v", resp["message"])
 	}
 }
 

@@ -2,9 +2,10 @@
 package handler
 
 import (
-	"encoding/json"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+	"github.com/yourorg/nsp-common/pkg/auth"
 	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
@@ -16,58 +17,63 @@ type Response struct {
 	TraceID string      `json:"trace_id,omitempty"`
 }
 
-// writeJSON writes a JSON response.
-func writeJSON(w http.ResponseWriter, status int, resp Response) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
-}
-
 // Health handles health check requests.
-func Health(w http.ResponseWriter, r *http.Request) {
-	logger.InfoContext(r.Context(), "health check")
+func Health(c *gin.Context) {
+	ctx := c.Request.Context()
+	logger.InfoContext(ctx, "health check")
 
-	writeJSON(w, http.StatusOK, Response{
+	c.JSON(http.StatusOK, Response{
 		Code:    0,
 		Message: "ok",
-		TraceID: logger.TraceIDFromContext(r.Context()),
+		TraceID: logger.TraceIDFromContext(ctx),
 	})
 }
 
 // Hello handles hello requests with optional name parameter.
-func Hello(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("name")
+func Hello(c *gin.Context) {
+	ctx := c.Request.Context()
+	name := c.Query("name")
 	if name == "" {
 		name = "World"
 	}
 
 	// Log with context fields
-	logger.InfoContext(r.Context(), "processing hello request",
+	logger.InfoContext(ctx, "processing hello request",
 		"name", name,
 	)
 
-	writeJSON(w, http.StatusOK, Response{
+	// Get credential info if available
+	var clientLabel string
+	if cred, ok := auth.CredentialFromGin(c); ok {
+		clientLabel = cred.Label
+	}
+
+	c.JSON(http.StatusOK, Response{
 		Code:    0,
 		Message: "Hello, " + name + "!",
-		TraceID: logger.TraceIDFromContext(r.Context()),
+		Data: gin.H{
+			"client": clientLabel,
+		},
+		TraceID: logger.TraceIDFromContext(ctx),
 	})
 }
 
 // User simulates fetching user info.
-func User(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("id")
+func User(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID := c.Query("id")
 	if userID == "" {
-		logger.WarnContext(r.Context(), "missing user id parameter")
-		writeJSON(w, http.StatusBadRequest, Response{
+		logger.WarnContext(ctx, "missing user id parameter")
+		c.JSON(http.StatusBadRequest, Response{
 			Code:    400,
 			Message: "user id is required",
-			TraceID: logger.TraceIDFromContext(r.Context()),
+			TraceID: logger.TraceIDFromContext(ctx),
 		})
 		return
 	}
 
 	// Simulate user lookup with detailed logging
-	log := logger.GetLogger().WithContext(r.Context()).With(
+	log := logger.GetLogger().WithContext(ctx).With(
 		logger.FieldUserID, userID,
 		logger.FieldModule, "user-handler",
 	)
@@ -81,32 +87,39 @@ func User(w http.ResponseWriter, r *http.Request) {
 		"email": "demo@example.com",
 	}
 
+	// Include credential info if available
+	if cred, ok := auth.CredentialFromGin(c); ok {
+		userData["requested_by"] = cred.Label
+	}
+
 	log.Info("user fetched successfully")
 
-	writeJSON(w, http.StatusOK, Response{
+	c.JSON(http.StatusOK, Response{
 		Code:    0,
 		Message: "success",
 		Data:    userData,
-		TraceID: logger.TraceIDFromContext(r.Context()),
+		TraceID: logger.TraceIDFromContext(ctx),
 	})
 }
 
 // Error simulates an error scenario for testing error logging.
-func Error(w http.ResponseWriter, r *http.Request) {
-	logger.ErrorContext(r.Context(), "simulated error occurred",
+func Error(c *gin.Context) {
+	ctx := c.Request.Context()
+	logger.ErrorContext(ctx, "simulated error occurred",
 		logger.FieldError, "this is a test error",
 		logger.FieldModule, "error-handler",
 	)
 
-	writeJSON(w, http.StatusInternalServerError, Response{
+	c.JSON(http.StatusInternalServerError, Response{
 		Code:    500,
 		Message: "simulated error",
-		TraceID: logger.TraceIDFromContext(r.Context()),
+		TraceID: logger.TraceIDFromContext(ctx),
 	})
 }
 
 // Panic simulates a panic for testing recovery middleware.
-func Panic(w http.ResponseWriter, r *http.Request) {
-	logger.InfoContext(r.Context(), "about to panic")
+func Panic(c *gin.Context) {
+	ctx := c.Request.Context()
+	logger.InfoContext(ctx, "about to panic")
 	panic("simulated panic for testing")
 }

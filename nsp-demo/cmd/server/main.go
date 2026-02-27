@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/yourorg/nsp-common/pkg/auth"
 	"github.com/yourorg/nsp-common/pkg/logger"
 	"github.com/yourorg/nsp-demo/internal/handler"
 	"github.com/yourorg/nsp-demo/internal/middleware"
@@ -38,26 +40,57 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// Build middleware chain
-	mux := http.NewServeMux()
+	// Set Gin mode based on dev flag
+	if *dev {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	// Create Gin engine without default middleware
+	r := gin.New()
+
+	// Setup AK/SK authentication
+	credStore := auth.NewMemoryStore([]*auth.Credential{
+		{
+			AccessKey: "test-ak",
+			SecretKey: "test-sk-1234567890abcdef",
+			Label:     "test-client",
+			Enabled:   true,
+		},
+		{
+			AccessKey: "demo-ak",
+			SecretKey: "demo-sk-abcdef1234567890",
+			Label:     "demo-client",
+			Enabled:   true,
+		},
+	})
+	nonceStore := auth.NewMemoryNonceStore()
+	verifier := auth.NewVerifier(credStore, nonceStore, nil)
+
+	// Apply middleware (order matters)
+	// 1. Recovery - catch panics
+	r.Use(middleware.GinRecovery())
+	// 2. Trace - inject trace_id and span_id
+	r.Use(middleware.GinTrace())
+	// 3. Logger - log requests
+	r.Use(middleware.GinLogger())
+	// 4. AK/SK Auth - authenticate requests (skip health endpoint)
+	r.Use(auth.AKSKAuthMiddleware(verifier, &auth.MiddlewareOption{
+		Skipper: auth.NewSkipperByPath("/health"),
+	}))
 
 	// Register routes
-	mux.HandleFunc("GET /health", handler.Health)
-	mux.HandleFunc("GET /hello", handler.Hello)
-	mux.HandleFunc("GET /user", handler.User)
-	mux.HandleFunc("GET /error", handler.Error)
-	mux.HandleFunc("GET /panic", handler.Panic)
-
-	// Apply middleware (order matters: outermost first)
-	var h http.Handler = mux
-	h = middleware.Logger(h)
-	h = middleware.Trace(h)
-	h = middleware.Recovery(h)
+	r.GET("/health", handler.Health)
+	r.GET("/hello", handler.Hello)
+	r.GET("/user", handler.User)
+	r.GET("/error", handler.Error)
+	r.GET("/panic", handler.Panic)
 
 	// Create server
 	srv := &http.Server{
 		Addr:         *addr,
-		Handler:      h,
+		Handler:      r,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
