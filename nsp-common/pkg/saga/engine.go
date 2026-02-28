@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 // Config holds configuration for the SAGA engine.
@@ -218,12 +219,22 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 	txID := uuid.New().String()
 	def.ID = txID
 
+	// Extract trace context and store in payload for propagation
+	payload := def.Payload
+	if payload == nil {
+		payload = make(map[string]any)
+	}
+	if tc, ok := trace.TraceFromContext(ctx); ok && tc != nil {
+		payload["_trace_id"] = tc.TraceID
+		payload["_span_id"] = tc.SpanId
+	}
+
 	// Create transaction record
 	now := time.Now()
 	tx := &Transaction{
 		ID:          txID,
 		Status:      TxStatusPending,
-		Payload:     def.Payload,
+		Payload:     payload,
 		CurrentStep: 0,
 		CreatedAt:   now,
 		UpdatedAt:   now,

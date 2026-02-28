@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/yourorg/nsp-common/pkg/trace"
 )
 
 // Executor errors
@@ -99,6 +101,17 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 	req.Header.Set("X-Saga-Transaction-Id", tx.ID)
 	req.Header.Set("X-Idempotency-Key", step.ID)
 
+	// Inject trace context for distributed tracing
+	// First try from context, then fall back to transaction payload
+	tc, ok := trace.TraceFromContext(ctx)
+	if !ok || tc == nil {
+		// Try to extract trace from transaction payload
+		tc = extractTraceFromPayload(tx.Payload)
+	}
+	if tc != nil {
+		trace.Inject(req, tc)
+	}
+
 	// Execute HTTP request
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -182,6 +195,17 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Saga-Transaction-Id", tx.ID)
 	req.Header.Set("X-Idempotency-Key", step.ID)
+
+	// Inject trace context for distributed tracing
+	// First try from context, then fall back to transaction payload
+	tc, ok := trace.TraceFromContext(ctx)
+	if !ok || tc == nil {
+		// Try to extract trace from transaction payload
+		tc = extractTraceFromPayload(tx.Payload)
+	}
+	if tc != nil {
+		trace.Inject(req, tc)
+	}
 
 	// Execute HTTP request
 	resp, err := e.client.Do(req)
@@ -299,6 +323,15 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 		req.Header.Set("X-Saga-Transaction-Id", tx.ID)
 		req.Header.Set("X-Idempotency-Key", step.ID+"-compensate")
 
+		// Inject trace context for distributed tracing
+		tc, ok := trace.TraceFromContext(ctx)
+		if !ok || tc == nil {
+			tc = extractTraceFromPayload(tx.Payload)
+		}
+		if tc != nil {
+			trace.Inject(req, tc)
+		}
+
 		// Execute HTTP request
 		resp, err := e.client.Do(req)
 		if err != nil {
@@ -378,6 +411,15 @@ func (e *Executor) Poll(ctx context.Context, tx *Transaction, step *Step, allSte
 	// Set headers
 	req.Header.Set("X-Saga-Transaction-Id", tx.ID)
 
+	// Inject trace context for distributed tracing
+	tc, ok := trace.TraceFromContext(ctx)
+	if !ok || tc == nil {
+		tc = extractTraceFromPayload(tx.Payload)
+	}
+	if tc != nil {
+		trace.Inject(req, tc)
+	}
+
 	// Execute HTTP request
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -405,4 +447,28 @@ func (e *Executor) Poll(ctx context.Context, tx *Transaction, step *Step, allSte
 	}
 
 	return response, nil
+}
+
+// extractTraceFromPayload extracts trace context from transaction payload
+// This is used when the original request context is not available (e.g., background workers)
+func extractTraceFromPayload(payload map[string]any) *trace.TraceContext {
+	if payload == nil {
+		return nil
+	}
+
+	traceID, ok := payload["_trace_id"].(string)
+	if !ok || traceID == "" {
+		return nil
+	}
+
+	spanID, _ := payload["_span_id"].(string)
+
+	tc := &trace.TraceContext{
+		TraceID:      traceID,
+		SpanId:       trace.NewSpanId(), // Generate new span for this operation
+		ParentSpanId: spanID,            // Parent is the original request span
+		Sampled:      true,
+	}
+
+	return tc
 }
