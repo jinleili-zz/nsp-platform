@@ -19,6 +19,8 @@ type ConsumerConfig struct {
 	Queues map[string]int
 	// StrictPriority enables strict priority ordering.
 	StrictPriority bool
+	// Logger is the asynq logger. If nil, asynq's default logger is used.
+	Logger asynq.Logger
 }
 
 // Consumer implements taskqueue.Consumer using asynq.
@@ -35,11 +37,16 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 		cfg.Concurrency = 2
 	}
 
-	server := asynq.NewServer(opt, asynq.Config{
+	asynqCfg := asynq.Config{
 		Concurrency:    cfg.Concurrency,
 		Queues:         cfg.Queues,
 		StrictPriority: cfg.StrictPriority,
-	})
+	}
+	if cfg.Logger != nil {
+		asynqCfg.Logger = cfg.Logger
+	}
+
+	server := asynq.NewServer(opt, asynqCfg)
 
 	return &Consumer{
 		server:   server,
