@@ -209,7 +209,9 @@ func DefaultQueueRouter(queueTag string, priority Priority) string {
 
 ## 二、现有 Demo 分析
 
-### 2.1 demo/main.go（成功场景）
+### 2.1 taskqueue-demo（成功场景）
+
+**位置**：`nsp-demo/cmd/taskqueue-demo/main.go`
 
 **场景**：VPC 创建工作流
 - Step 1: 创建 VRF
@@ -222,7 +224,9 @@ func DefaultQueueRouter(queueTag string, priority Priority) string {
 - 所有步骤正常执行
 - 演示完整的提交→执行→完成流程
 
-### 2.2 demo_fail/main.go（失败重试场景）
+### 2.2 taskqueue-demo-fail（失败重试场景）
+
+**位置**：`nsp-demo/cmd/taskqueue-demo-fail/main.go`
 
 **场景**：模拟步骤失败
 - Step 1: 成功
@@ -248,9 +252,9 @@ if attempt == 1 {
 callbackSender.Success(ctx, taskID, result)
 ```
 
-## 三、新增简化示例
+### 2.3 taskqueue-simple（入门示例）
 
-### 3.1 example_simple/main.go
+**位置**：`nsp-demo/cmd/taskqueue-simple/main.go`
 
 **目的**：降低学习门槛，提供最简化的示例
 
@@ -272,7 +276,7 @@ redis-server &
 psql -c "CREATE DATABASE taskqueue_simple;"
 
 # 运行示例
-cd nsp-common/pkg/taskqueue/example_simple
+cd nsp-demo/cmd/taskqueue-simple
 go run main.go
 ```
 
@@ -289,8 +293,6 @@ go run main.go
 [Demo] Status: succeeded (completed=2/2, failed=0)
 [Demo] ✅ Workflow SUCCEEDED!
 ```
-
-## 四、使用指南
 
 ### 4.1 快速开始步骤
 

@@ -379,19 +379,33 @@ firewallConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig
 
 查看代码库中的示例：
 
-### demo/main.go - 成功场景
+### taskqueue-simple - 入门示例（推荐新手）
+最简化的示例，演示基本的工作流提交和执行：
+- 单机 Redis（无需集群）
+- 简单的两步工作流（创建记录 → 发送邮件）
+- 完整的启动和关闭流程
+
+运行方式：
+```bash
+cd nsp-demo/cmd/taskqueue-simple
+go run main.go
+```
+
+### taskqueue-demo - 完整功能演示
 演示完整的 VPC 创建工作流：
 - 创建 VRF
 - 创建 VLAN 子接口
 - 创建防火墙区域
+- Redis Cluster 集群模式
+- 自定义队列路由器
 
 运行方式：
 ```bash
-cd nsp-common/pkg/taskqueue/demo
+cd nsp-demo/cmd/taskqueue-demo
 go run main.go
 ```
 
-### demo_fail/main.go - 失败重试场景
+### taskqueue-demo-fail - 失败重试场景
 演示步骤失败和手动重试：
 - 第二个步骤首次执行失败
 - 工作流进入 failed 状态
@@ -400,9 +414,11 @@ go run main.go
 
 运行方式：
 ```bash
-cd nsp-common/pkg/taskqueue/demo_fail
+cd nsp-demo/cmd/taskqueue-demo-fail
 go run main.go
 ```
+
+**详细说明**：参考 `nsp-demo/cmd/TASKQUEUE_DEMOS.md`
 
 ## 最佳实践
 
