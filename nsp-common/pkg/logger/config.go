@@ -2,6 +2,43 @@
 // config.go defines configuration structures and preset constructors.
 package logger
 
+// Category represents a log category for classifying log entries by scenario.
+// Each category can have independent output destinations and log levels.
+type Category string
+
+// Log category constants.
+const (
+	// CategoryAccess is for HTTP/RPC access logs (request method, path, status, latency, etc.).
+	CategoryAccess Category = "access"
+
+	// CategoryPlatform is for platform infrastructure logs (DB, MQ, cache, framework internals, etc.).
+	CategoryPlatform Category = "platform"
+
+	// CategoryBusiness is for business logic logs (domain events, operations, business IDs, etc.).
+	CategoryBusiness Category = "business"
+)
+
+// CategoryConfig defines per-category logger configuration.
+// Fields here override the corresponding fields in the parent Config.
+type CategoryConfig struct {
+	// Level overrides the global log level for this category.
+	// If empty, the global Config.Level is used.
+	Level Level `json:"level" yaml:"level"`
+
+	// OutputPaths overrides the global output destinations (simple mode).
+	// Supported values: "stdout", "stderr", or file paths.
+	// If empty and Outputs is also empty, falls back to the global Config.OutputPaths.
+	OutputPaths []string `json:"output_paths" yaml:"output_paths"`
+
+	// Outputs overrides the global output configurations (advanced mode).
+	// If both OutputPaths and Outputs are specified, Outputs takes precedence.
+	Outputs []OutputConfig `json:"outputs" yaml:"outputs"`
+
+	// Rotation configures log file rotation for OutputPaths mode.
+	// If nil, the global Config.Rotation is used.
+	Rotation *RotationConfig `json:"rotation" yaml:"rotation"`
+}
+
 // Level represents log level as a string type.
 // Valid values: "debug", "info", "warn", "error"
 type Level string
@@ -159,6 +196,11 @@ type Config struct {
 	// Sampling configures log sampling for high-throughput scenarios.
 	// Set to nil to disable sampling.
 	Sampling *SamplingConfig `json:"sampling" yaml:"sampling"`
+
+	// Categories defines per-category logger configurations.
+	// Each category (access, platform, business) can have its own output paths and log level.
+	// Categories not listed here fall back to the global output and level settings.
+	Categories map[Category]CategoryConfig `json:"categories" yaml:"categories"`
 }
 
 // DefaultConfig returns a production-ready configuration with sensible defaults.

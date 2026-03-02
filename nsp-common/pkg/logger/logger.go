@@ -110,6 +110,12 @@ var (
 	initialized  bool
 )
 
+// Category logger registry: stores one Logger per Category.
+var (
+	categoryLoggers map[Category]Logger
+	categoryMu      sync.RWMutex
+)
+
 // Init initializes the global logger with the given configuration.
 // This should be called once at application startup.
 // If called multiple times, subsequent calls will replace the global logger.
@@ -148,7 +154,107 @@ func Init(cfg *Config) error {
 	globalLogger = l
 	initialized = true
 
+	// Initialize per-category loggers.
+	newCategoryLoggers := make(map[Category]Logger, len(cfg.Categories))
+	for cat, catCfg := range cfg.Categories {
+		catLogger, err := newCategoryLogger(cfg, cat, catCfg)
+		if err != nil {
+			return err
+		}
+		newCategoryLoggers[cat] = catLogger
+	}
+	categoryMu.Lock()
+	categoryLoggers = newCategoryLoggers
+	categoryMu.Unlock()
+
 	return nil
+}
+
+// newCategoryLogger builds a Logger for the given category by merging the category
+// config on top of the global config and attaching the log_category field.
+func newCategoryLogger(global *Config, cat Category, catCfg CategoryConfig) (Logger, error) {
+	// Build a derived Config: start from global, override with category-specific settings.
+	derived := &Config{
+		ServiceName:      global.ServiceName,
+		EnableCaller:     global.EnableCaller,
+		EnableStackTrace: global.EnableStackTrace,
+		Development:      global.Development,
+		Sampling:         global.Sampling,
+		Format:           global.Format,
+	}
+
+	// Level: use category level if set, otherwise inherit global.
+	if catCfg.Level != "" {
+		derived.Level = catCfg.Level
+	} else {
+		derived.Level = global.Level
+	}
+
+	// Outputs: category Outputs > category OutputPaths > global Outputs > global OutputPaths.
+	switch {
+	case len(catCfg.Outputs) > 0:
+		derived.Outputs = catCfg.Outputs
+	case len(catCfg.OutputPaths) > 0:
+		rotation := catCfg.Rotation
+		if rotation == nil {
+			rotation = global.Rotation
+		}
+		derived.OutputPaths = catCfg.OutputPaths
+		derived.Rotation = rotation
+	case len(global.Outputs) > 0:
+		derived.Outputs = global.Outputs
+	default:
+		derived.OutputPaths = global.OutputPaths
+		derived.Rotation = global.Rotation
+	}
+
+	derived.applyDefaults()
+
+	l, err := newZapLogger(derived)
+	if err != nil {
+		return nil, err
+	}
+
+	// Attach the log_category field so every log entry carries the category label.
+	return l.With(FieldLogCategory, string(cat)), nil
+}
+
+// getCategoryLogger returns the Logger registered for the given category.
+// If the category has no dedicated logger, it falls back to the global logger
+// with the log_category field attached.
+func getCategoryLogger(cat Category) Logger {
+	categoryMu.RLock()
+	if categoryLoggers != nil {
+		if l, ok := categoryLoggers[cat]; ok {
+			categoryMu.RUnlock()
+			return l
+		}
+	}
+	categoryMu.RUnlock()
+
+	// Fallback: global logger with category label.
+	return GetLogger().With(FieldLogCategory, string(cat))
+}
+
+// Access returns the logger for access logs (HTTP/RPC request records).
+// Each log entry automatically includes log_category="access".
+// Typical fields: FieldHTTPMethod, FieldPath, FieldHTTPStatus, FieldLatencyMS, FieldPeerAddr.
+func Access() Logger {
+	return getCategoryLogger(CategoryAccess)
+}
+
+// Platform returns the logger for platform infrastructure logs.
+// Each log entry automatically includes log_category="platform".
+// Typical fields: FieldModule, FieldMethod, FieldLatencyMS, FieldError.
+func Platform() Logger {
+	return getCategoryLogger(CategoryPlatform)
+}
+
+// Business returns the logger for business logic logs.
+// Each log entry automatically includes log_category="business".
+// Typical fields: FieldBizDomain, FieldBizID, FieldOperation, FieldUserID.
+func Business() Logger {
+	return getCategoryLogger(CategoryBusiness)
 }
 
 // GetLogger returns the global logger instance.

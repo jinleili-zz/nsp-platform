@@ -9,6 +9,11 @@ const (
 	// Example: "nsp-order", "nsp-user", "nsp-gateway"
 	FieldService = "service"
 
+	// FieldLogCategory is the key for log category classification.
+	// Values: "access", "platform", "business"
+	// Automatically injected by category loggers (Access(), Platform(), Business()).
+	FieldLogCategory = "log_category"
+
 	// FieldTraceID is the key for distributed tracing trace ID.
 	// Used to correlate logs across multiple services in a single request chain.
 	FieldTraceID = "trace_id"
@@ -52,4 +57,28 @@ const (
 	// FieldPeerAddr is the key for remote peer address.
 	// Example: client IP address, downstream service address.
 	FieldPeerAddr = "peer_addr"
+
+	// Access log specific fields.
+
+	// FieldHTTPMethod is the key for HTTP request method.
+	// Example: "GET", "POST", "PUT", "DELETE"
+	FieldHTTPMethod = "http_method"
+
+	// FieldHTTPStatus is the key for HTTP response status code.
+	// Example: 200, 400, 404, 500
+	FieldHTTPStatus = "http_status"
+
+	// Business log specific fields.
+
+	// FieldBizDomain is the key for the business domain of the operation.
+	// Example: "order", "payment", "user", "inventory"
+	FieldBizDomain = "biz_domain"
+
+	// FieldBizID is the key for the primary business entity identifier.
+	// Example: "ORD-12345", "PAY-67890", "USR-001"
+	FieldBizID = "biz_id"
+
+	// FieldOperation is the key for the business operation being performed.
+	// Example: "create", "update", "cancel", "approve"
+	FieldOperation = "operation"
 )
