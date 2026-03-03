@@ -21,9 +21,8 @@ nsp-common/
 
 - **Loader 接口**: 业务代码只依赖此接口
   - `Load(target any) error` - 加载并反序列化配置
-  - `Unmarshal(target any) error` - 从内存反序列化（用于热更新回调）
-  - `OnChange(fn func(UnmarshalFunc))` - 注册配置变更回调
-  - `Close()` - 停止监听并释放资源
+  - `OnChange(fn func(apply func(any) error))` - 注册配置变更回调
+  - `Close()` - 停止监听并释放资源（可多次调用）
 
 - **Option 结构体**: 配置选项
   - `ConfigFile` - 配置文件完整路径
@@ -37,32 +36,37 @@ nsp-common/
 
 - **viperLoader 结构体**: viper 的封装实现
   - 内部使用 `*viper.Viper` 实例
-  - `sync.RWMutex` 保护回调列表和并发访问
-  - `callbacks []func(UnmarshalFunc)` 存储注册的回调
+  - `sync.RWMutex` 保护回调列表和 viper 内部状态的并发访问
+  - `callbacks []func(func(any) error)` 存储注册的回调
   - `done chan struct{}` 用于 Close 信号
+  - `closeOnce sync.Once` 保证 Close 幂等
+  - `watchOnce sync.Once` 保证 watcher 只启动一次
 
 - **关键特性**:
+  - 严格模式：`Load()` 和热更新回调均使用 `UnmarshalExact`，未知字段报错
+  - 延迟启动 watcher：首次 `Load()` 成功后才启动文件监听，避免与初始化竞争
+  - 并发安全：`Load()` 和热更新回调共享 `mu` 锁，防止 viper 内部状态竞争
   - 热更新支持：使用 viper.WatchConfig() 和 OnConfigChange()
-  - 并发安全：回调执行在独立 goroutine，panic 被 recover 捕获
+  - panic 隔离：对每个回调单独 recover，一个回调崩溃不阻塞后续回调
+  - 回调快照（copy-before-execute）：持锁期间仅拷贝回调列表，执行阶段不持锁
   - Kubernetes 兼容：fsnotify 已处理软链接原子替换场景
-  - 资源管理：Close() 后不再触发回调
+  - 资源管理：Close() 后不再触发回调，支持多次调用
 
 ### 3. 测试覆盖 (`config_test.go`)
 
-实现了 12 个测试用例，覆盖：
+实现了 11 个测试用例，覆盖：
 
-1. ✅ `Test_Load_YAML` - YAML 格式加载
-2. ✅ `Test_Load_JSON` - JSON 格式加载  
-3. ✅ `Test_Load_DefaultValue` - 默认值使用
-4. ⚠️ `Test_Load_EnvOverride` - 环境变量覆盖（部分通过）
-5. ⚠️ `Test_Load_UnknownField` - 未知字段检测（未启用严格模式）
-6. ✅ `Test_Load_FileNotFound` - 文件不存在错误处理
-7. ✅ `Test_Unmarshal_AfterLoad` - Load 后 Unmarshal 一致性
-8. ✅ `Test_OnChange_Triggered` - 热更新回调触发
-9. ✅ `Test_OnChange_MultipleCallbacks` - 多回调按序执行
-10. ✅ `Test_OnChange_WatchFalse` - Watch 关闭时回调注册
-11. ✅ `Test_Close_StopsWatch` - Close 停止监听
-12. ✅ `Test_OnChange_PanicRecovery` - 回调 panic 恢复
+1. `Test_Load_YAML` - YAML 格式加载
+2. `Test_Load_JSON` - JSON 格式加载
+3. `Test_Load_DefaultValue` - 默认值使用
+4. `Test_Load_EnvOverride` - 环境变量覆盖
+5. `Test_Load_UnknownField` - 未知字段检测（严格模式）
+6. `Test_Load_FileNotFound` - 文件不存在错误处理
+7. `Test_OnChange_Triggered` - 热更新回调触发
+8. `Test_OnChange_MultipleCallbacks` - 多回调按序执行
+9. `Test_OnChange_WatchFalse` - Watch 关闭时回调注册
+10. `Test_Close_StopsWatch` - Close 停止监听
+11. `Test_OnChange_PanicRecovery` - 回调 panic 恢复
 
 ## 依赖要求
 
@@ -111,9 +115,9 @@ func main() {
     }
 
     // 注册热更新回调
-    loader.OnChange(func(unmarshal config.UnmarshalFunc) {
+    loader.OnChange(func(apply func(target any) error) {
         var newCfg AppConfig
-        if err := unmarshal(&newCfg); err != nil {
+        if err := apply(&newCfg); err != nil {
             // 新配置解析失败，记录日志，继续使用旧配置
             return
         }
@@ -127,14 +131,9 @@ func main() {
 ## 设计亮点
 
 1. **接口隔离**: 业务代码只依赖接口，实现层可替换
-2. **并发安全**: 热更新回调在独立 goroutine 执行，互不影响
-3. **错误恢复**: 单个回调 panic 不影响其他回调执行
-4. **资源管理**: 明确的 Close() 方法用于优雅关闭
-5. **K8s 兼容**: 正确处理 Kubernetes Secret 卷更新场景
-6. **测试完备**: 12 个测试用例覆盖主要使用场景
-
-## 注意事项
-
-- 当前实现未启用 viper 的严格模式（ErrorUnused），因此不会对未知字段报错
-- 环境变量覆盖功能依赖 viper.AutomaticEnv()，在某些复杂场景下可能需要额外配置
-- 热更新功能在文件系统事件频繁的环境中可能产生多次触发，业务代码应做好幂等处理
+2. **严格模式**: Load 和热更新均使用 UnmarshalExact，未知字段报错，防止配置拼写错误
+3. **并发安全**: Load 和热更新共享互斥锁，watcher 延迟到首次 Load 后启动
+4. **错误恢复**: 单个回调 panic 不影响其他回调执行
+5. **幂等关闭**: Close() 使用 sync.Once 保护，可安全多次调用
+6. **K8s 兼容**: 正确处理 Kubernetes Secret 卷更新场景
+7. **测试完备**: 11 个测试用例覆盖主要使用场景

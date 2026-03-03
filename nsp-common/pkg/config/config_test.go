@@ -2,15 +2,11 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
-// 本次改动：
-// 1. 删除 Test_Unmarshal_AfterLoad（对应已删除的 Unmarshal 方法）
-// 2. 所有热更新测试的回调参数由 func(UnmarshalFunc) 改为 func(apply func(any) error)
-// 3. 删除所有涉及 UnmarshalFunc 类型的代码
-
 package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -50,7 +46,6 @@ debug: true
 version: v1.0.0
 `
 	file := createTempConfigFile(t, "config.yaml", content)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -102,7 +97,6 @@ func Test_Load_JSON(t *testing.T) {
   "version": "v1.0.0"
 }`
 	file := createTempConfigFile(t, "config.json", content)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -140,15 +134,14 @@ database:
   host: db.example.com
 `
 	file := createTempConfigFile(t, "config.yaml", content)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
 		Defaults: map[string]any{
-			"server.port":     9000,
-			"database.port":   5432,
+			"server.port":       9000,
+			"database.port":     5432,
 			"database.username": "defaultuser",
-			"debug":           false,
+			"debug":             false,
 		},
 	})
 	if err != nil {
@@ -184,7 +177,6 @@ server:
 debug: false
 `
 	file := createTempConfigFile(t, "config.yaml", content)
-	defer os.Remove(file)
 
 	// Set environment variables
 	os.Setenv("TEST_SERVER_PORT", "9000")
@@ -226,7 +218,6 @@ server:
 debug: true
 `
 	file := createTempConfigFile(t, "config.yaml", content)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -273,7 +264,6 @@ server:
 debug: true
 `
 	file := createTempConfigFile(t, "config.yaml", content1)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -283,6 +273,12 @@ debug: true
 		t.Fatalf("New() error = %v", err)
 	}
 	defer loader.Close()
+
+	// Load must be called before OnChange callbacks can fire (starts watcher).
+	var cfg AppConfig
+	if err := loader.Load(&cfg); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
 
 	changed := make(chan struct{}, 1)
 	var newCfg AppConfig
@@ -322,7 +318,6 @@ func Test_OnChange_MultipleCallbacks(t *testing.T) {
 	content1 := `debug: false`
 	content2 := `debug: true`
 	file := createTempConfigFile(t, "config.yaml", content1)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -332,6 +327,11 @@ func Test_OnChange_MultipleCallbacks(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer loader.Close()
+
+	var cfg AppConfig
+	if err := loader.Load(&cfg); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
 
 	callOrder := make([]int, 0, 2)
 	done := make(chan struct{}, 2)
@@ -378,7 +378,6 @@ func Test_OnChange_WatchFalse(t *testing.T) {
 	content1 := `debug: false`
 	content2 := `debug: true`
 	file := createTempConfigFile(t, "config.yaml", content1)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -411,7 +410,6 @@ func Test_Close_StopsWatch(t *testing.T) {
 	content1 := `debug: false`
 	content2 := `debug: true`
 	file := createTempConfigFile(t, "config.yaml", content1)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -419,6 +417,11 @@ func Test_Close_StopsWatch(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
+	}
+
+	var cfg AppConfig
+	if err := loader.Load(&cfg); err != nil {
+		t.Fatalf("Load() error = %v", err)
 	}
 
 	callbackCalled := false
@@ -447,7 +450,6 @@ func Test_OnChange_PanicRecovery(t *testing.T) {
 	content1 := `debug: false`
 	content2 := `debug: true`
 	file := createTempConfigFile(t, "config.yaml", content1)
-	defer os.Remove(file)
 
 	loader, err := New(Option{
 		ConfigFile: file,
@@ -457,6 +459,11 @@ func Test_OnChange_PanicRecovery(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer loader.Close()
+
+	var cfg AppConfig
+	if err := loader.Load(&cfg); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
 
 	panicked := false
 	executed := false
@@ -502,12 +509,9 @@ func Test_OnChange_PanicRecovery(t *testing.T) {
 // Helper function to create temporary config file
 func createTempConfigFile(t *testing.T, name, content string) string {
 	t.Helper()
-	
-	// Create temp directory
+
 	tempDir := t.TempDir()
-	
-	// Create file in temp directory
-	filePath := tempDir + "/" + name
+	filePath := filepath.Join(tempDir, name)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		t.Fatalf("Failed to write temp file: %v", err)
 	}

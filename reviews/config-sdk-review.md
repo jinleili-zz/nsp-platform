@@ -170,3 +170,70 @@ filePath := tempDir + "/" + name
 1. **Issue 1**：用 `sync.Once` 保护 `close(l.done)`，防止生产代码崩溃。
 2. **Issue 2**：`applyFn` 改用 `UnmarshalExact`，保持与 `Load()` 行为一致。
 3. **Issue 4**：更新 README.md，移除已删除 API 的引用。
+
+---
+
+## Review Response (修改记录)
+
+### Issue 1 — `Close()` 二次调用 panic — **已修复**
+
+`viperLoader` 新增 `closeOnce sync.Once` 字段，`Close()` 改为 `l.closeOnce.Do(func() { close(l.done) })`。
+同步更新 `Close()` 的 godoc，注明可安全多次调用。
+
+### Issue 2 — `applyFn` 使用宽松 Unmarshal — **已修复**
+
+`startWatching()` 中 `applyFn` 由 `l.v.Unmarshal(target)` 改为 `l.v.UnmarshalExact(target)`，
+与 `Load()` 行为保持一致。同时移除了 `applyFn` 内部的 `l.mu.RLock()`，因为 `applyFn` 的构造
+和回调执行已在外层 `l.mu.Lock()` 保护范围内统一处理。
+
+### Issue 3 — `Load()` 未持锁 — **已修复**
+
+两处改动：
+1. `Load()` 整体加 `l.mu.Lock()` 保护，与热更新回调共享同一把锁，防止并发修改 viper 内部状态。
+2. `startWatching()` 从 `New()` 中移出，延迟到首次 `Load()` 成功后通过 `watchOnce.Do()` 启动。
+   这确保 viper 内部 config map 在 watcher 启动前已完成初始化，从根本上消除竞争窗口。
+
+### Issue 4 — README 过时 — **已修复**
+
+全面更新 README.md：
+- 移除 `Unmarshal` 方法和 `UnmarshalFunc` 类型的引用
+- 更新 `OnChange` 签名为 `OnChange(fn func(apply func(any) error))`
+- 更新 `callbacks` 字段类型描述
+- 更新使用示例为新回调风格
+- 测试数量改为 11 个
+- 新增 `closeOnce`、`watchOnce` 字段说明
+- 新增严格模式、延迟 watcher、幂等 Close 等设计亮点说明
+- 移除"未启用严格模式"的注意事项（已启用 UnmarshalExact）
+
+### Issue 5 — 变更说明注释 — **已修复**
+
+删除 `config.go`、`viper.go`、`config_test.go` 三个文件顶部的 `// 本次改动：...` 注释块。
+
+### Issue 6 — `OnChange` 参数命名 — **已修复**
+
+接口签名由 `OnChange(apply func(func(any) error))` 改为 `OnChange(fn func(apply func(any) error))`。
+`viper.go` 中 `OnChange` 方法实现同步更新参数名。
+
+### Issue 7 — 测试小问题 — **已修复**
+
+- 移除所有测试用例中冗余的 `defer os.Remove(file)`（`t.TempDir()` 已自动清理）
+- `createTempConfigFile` 中路径拼接改为 `filepath.Join(tempDir, name)`
+- 新增 `"path/filepath"` import
+
+---
+
+## 修改汇总
+
+| # | 问题 | 处置 | 涉及文件 |
+|---|------|------|---------|
+| 1 | Close() 二次调用 panic | **已修复** | viper.go |
+| 2 | applyFn 与 Load 行为不一致 | **已修复** | viper.go |
+| 3 | Load() 与热更新竞争 | **已修复** | config.go, viper.go |
+| 4 | README 过时 | **已修复** | README.md |
+| 5 | 变更说明注释 | **已修复** | config.go, viper.go, config_test.go |
+| 6 | OnChange 参数命名 | **已修复** | config.go, viper.go |
+| 7 | 测试小问题 | **已修复** | config_test.go |
+
+### 验证结果
+
+- 单元测试：11/11 通过 (`go test ./pkg/config/... -v -count=1`)

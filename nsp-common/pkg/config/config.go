@@ -2,12 +2,6 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
-// 本次改动：
-// 1. 删除 Unmarshal 方法和 UnmarshalFunc 类型
-// 2. OnChange 回调参数由 func(UnmarshalFunc) 改为 func(apply func(any) error)
-// 3. 更新 OnChange godoc 注释，说明 apply 参数的语义
-// 4. 更新文件末尾的使用示例
-
 // Package config provides a unified configuration management SDK
 // that encapsulates spf13/viper as the underlying implementation.
 //
@@ -39,10 +33,11 @@ type Loader interface {
 	//
 	// If Watch=false, registering a callback does not error, but it will never
 	// be triggered.
-	OnChange(apply func(func(any) error))
+	OnChange(fn func(apply func(any) error))
 
 	// Close stops configuration watching and releases associated resources
 	// (file descriptors, background goroutines, etc.).
+	// Safe to call multiple times; subsequent calls are no-ops.
 	// Should be called during graceful shutdown and at the end of test cases.
 	Close()
 }
@@ -88,11 +83,6 @@ func New(opt Option) (Loader, error) {
 	loader, err := newViperLoader(opt)
 	if err != nil {
 		return nil, err
-	}
-
-	// Start watching if enabled
-	if opt.Watch {
-		loader.startWatching()
 	}
 
 	return loader, nil

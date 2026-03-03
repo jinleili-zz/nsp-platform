@@ -2,12 +2,6 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
-// 本次改动：
-// 1. callbacks 字段类型由 []func(UnmarshalFunc) 改为 []func(func(any) error)
-// 2. OnChange 方法签名同步修改
-// 3. startWatching 中 applyFn 替代 unmarshalFn，回调调用方式同步修改
-// 4. 删除 Unmarshal 方法实现
-
 package config
 
 import (
@@ -21,10 +15,13 @@ import (
 
 // viperLoader implements the Loader interface using spf13/viper as the underlying library.
 type viperLoader struct {
-	v         *viper.Viper              // viper instance
-	mu        sync.RWMutex              // protects callbacks list and hot-reload concurrency
-	callbacks []func(func(any) error)   // registered change callbacks
-	done      chan struct{}              // signal channel for Close
+	v         *viper.Viper            // viper instance
+	mu        sync.RWMutex            // protects callbacks list and viper internal state
+	callbacks []func(func(any) error) // registered change callbacks
+	done      chan struct{}            // signal channel for Close
+	closeOnce sync.Once               // ensures Close is idempotent
+	watchOnce sync.Once               // ensures startWatching is called at most once
+	watch     bool                    // whether file watching is enabled
 }
 
 // newViperLoader creates a new viperLoader instance.
@@ -66,8 +63,9 @@ func newViperLoader(opt Option) (*viperLoader, error) {
 	}
 
 	return &viperLoader{
-		v:    v,
-		done: make(chan struct{}),
+		v:     v,
+		done:  make(chan struct{}),
+		watch: opt.Watch,
 	}, nil
 }
 
@@ -75,31 +73,46 @@ func newViperLoader(opt Option) (*viperLoader, error) {
 // Each call re-reads the file content.
 // Uses UnmarshalExact which returns an error for any unknown fields in the
 // config file, preventing typos from being silently ignored.
+//
+// If Watch is enabled, the file watcher is started after the first
+// successful Load call, ensuring that viper's internal state is fully
+// initialised before any concurrent file-change events can fire.
 func (l *viperLoader) Load(target any) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if err := l.v.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
-	return l.v.UnmarshalExact(target)
+	if err := l.v.UnmarshalExact(target); err != nil {
+		return err
+	}
+
+	// Start watching after the first successful Load so that viper's
+	// internal config map is populated before the watcher can fire.
+	if l.watch {
+		l.watchOnce.Do(func() { l.startWatching() })
+	}
+
+	return nil
 }
 
 // OnChange registers a configuration change callback.
 // If Watch=false, registering callbacks does not error but they will never be triggered.
-func (l *viperLoader) OnChange(apply func(func(any) error)) {
+func (l *viperLoader) OnChange(fn func(func(any) error)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.callbacks = append(l.callbacks, apply)
+	l.callbacks = append(l.callbacks, fn)
 }
 
 // Close stops file watching and releases resources.
-// After Close, file change events will no longer trigger callbacks.
+// Safe to call multiple times; subsequent calls are no-ops.
 func (l *viperLoader) Close() {
-	close(l.done)
-	// Note: viper does not provide a method to stop WatchConfig.
-	// We handle this by checking the done channel status in the OnConfigChange callback.
+	l.closeOnce.Do(func() { close(l.done) })
 }
 
 // startWatching starts file watching if Watch=true is configured.
-// This should be called after all callbacks are registered.
+// Must be called with l.mu held (called from Load).
 func (l *viperLoader) startWatching() {
 	l.v.WatchConfig()
 	l.v.OnConfigChange(func(e fsnotify.Event) {
@@ -114,16 +127,14 @@ func (l *viperLoader) startWatching() {
 		// which triggers fsnotify Create events. viper's internal fsnotify
 		// already handles this scenario correctly, no additional adaptation needed.
 
-		// Acquire write lock to protect callbacks list
+		// Acquire write lock to protect callbacks list and viper state
 		l.mu.Lock()
 
 		// applyFn is provided to each callback so that it can deserialize the
-		// latest in-memory configuration. It holds a read lock to ensure the
-		// viper state is not modified while unmarshalling.
+		// latest in-memory configuration. Uses UnmarshalExact to maintain the
+		// same strict behaviour as Load (unknown fields cause an error).
 		applyFn := func(target any) error {
-			l.mu.RLock()
-			defer l.mu.RUnlock()
-			return l.v.Unmarshal(target)
+			return l.v.UnmarshalExact(target)
 		}
 
 		// Copy callbacks to avoid holding lock during execution
