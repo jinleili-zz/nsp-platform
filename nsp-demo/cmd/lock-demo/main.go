@@ -2,12 +2,13 @@
 //
 // NSP 分布式锁 SDK 使用示例
 //
-// 本 demo 通过连接真实 Redis（单节点）演示 lock 包的四个核心场景：
+// 本 demo 通过连接真实 Redis（单节点）演示 lock 包的五个核心场景：
 //
 //  1. 基础获取/释放：Acquire + Release 正常流程
 //  2. TryAcquire 快速失败：持有锁期间，另一个实例立即返回 ErrNotAcquired
 //  3. Watchdog 自动续约：持锁时间超过 TTL 后锁依然有效
 //  4. 互斥保证：10 个 goroutine 并发写同一计数器，结果必须正确
+//  5. 超时放弃：5 秒内未能获取锁则自动放弃（context.WithTimeout）
 //
 // 运行前请先启动 Redis：
 //
@@ -55,6 +56,7 @@ func main() {
 	demoTryAcquireFail(client)
 	demoWatchdog(client)
 	demoMutualExclusion(client)
+	demoCtxTimeout(client)
 
 	fmt.Println("\n=== 所有 Demo 执行完毕 ===")
 }
@@ -203,5 +205,55 @@ func demoMutualExclusion(client lock.Client) {
 	} else {
 		fmt.Fprintf(os.Stderr, "  最终计数器 = %d，期望 %d（互斥失败！）\n", counter, goroutines)
 	}
+	fmt.Println()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 场景 5：超时放弃——5 秒内未获取到锁则自动放弃
+// ─────────────────────────────────────────────────────────────────────────────
+
+func demoCtxTimeout(client lock.Client) {
+	fmt.Println("── 场景 5：超时放弃（5s 内未拿到锁则放弃）─────────────────")
+
+	lockName := "demo:payment:PAY-888"
+	ctx := context.Background()
+
+	// 实例 A 持有锁 10 秒，模拟长时间占锁的业务
+	lA := client.New(lockName, lock.WithTTL(10*time.Second))
+	if err := lA.Acquire(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "  A: Acquire 失败: %v\n", err)
+		return
+	}
+	fmt.Println("  [A] 已持有锁，模拟长时间占锁（10s TTL）")
+
+	// 实例 B：最多等 5 秒，超时后自动放弃
+	// RetryDelay 设短一些让重试更频繁，RetryCount 足够大确保是 ctx 先超时
+	lB := client.New(lockName,
+		lock.WithRetryDelay(200*time.Millisecond),
+		lock.WithRetryCount(1000),
+	)
+
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fmt.Println("  [B] 开始等待获取锁（超时上限 5s）...")
+	start := time.Now()
+	err := lB.Acquire(timeoutCtx)
+	elapsed := time.Since(start)
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		fmt.Printf("  [B] 等待 %v 后超时放弃，收到 context.DeadlineExceeded\n",
+			elapsed.Round(time.Millisecond))
+		fmt.Println("  [B] 业务逻辑：记录日志，返回「稍后重试」提示给调用方")
+	case err == nil:
+		fmt.Println("  [B] 意外获取到锁（A 应仍在持有）")
+		_ = lB.Release(ctx)
+	default:
+		fmt.Fprintf(os.Stderr, "  [B] 未预期的错误: %v\n", err)
+	}
+
+	_ = lA.Release(ctx)
+	fmt.Println("  [A] 已释放锁")
 	fmt.Println()
 }
