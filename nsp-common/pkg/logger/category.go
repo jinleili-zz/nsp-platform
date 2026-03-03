@@ -3,6 +3,8 @@
 package logger
 
 import (
+	"errors"
+	"path/filepath"
 	"sync"
 )
 
@@ -86,9 +88,8 @@ type categoryManager struct {
 
 // Global category manager instance.
 var (
-	catManager  *categoryManager
+	catManager   *categoryManager
 	catManagerMu sync.RWMutex
-	catInitialized bool
 )
 
 // InitMultiCategory initializes the multi-category logging system.
@@ -162,12 +163,12 @@ func InitMultiCategory(cfg *MultiCategoryConfig) error {
 
 	catManagerMu.Lock()
 	catManager = manager
-	catInitialized = true
 	catManagerMu.Unlock()
 
-	// Also initialize global logger with business logger as default
+	// Also initialize global logger with business logger (with category field)
+	// so that GetLogger() returns a logger consistent with Business()
 	globalMu.Lock()
-	globalLogger = businessLogger
+	globalLogger = manager.business
 	initialized = true
 	globalMu.Unlock()
 
@@ -210,13 +211,7 @@ func buildCategoryLoggerConfig(cfg *MultiCategoryConfig, category LogCategory) *
 		if result.Format == "" {
 			result.Format = FormatJSON
 		}
-		// Access logs typically don't need caller info
-		if catCfg == nil || !catCfg.EnableCaller {
-			result.EnableCaller = false
-		}
-		if catCfg == nil || !catCfg.EnableStackTrace {
-			result.EnableStackTrace = false
-		}
+		// Access logs: EnableCaller and EnableStackTrace default to false (zero value)
 	case CategoryPlatform:
 		if result.Level == "" {
 			result.Level = LevelInfo
@@ -224,13 +219,7 @@ func buildCategoryLoggerConfig(cfg *MultiCategoryConfig, category LogCategory) *
 		if result.Format == "" {
 			result.Format = FormatJSON
 		}
-		// Platform logs typically don't need caller info
-		if catCfg == nil || !catCfg.EnableCaller {
-			result.EnableCaller = false
-		}
-		if catCfg == nil || !catCfg.EnableStackTrace {
-			result.EnableStackTrace = false
-		}
+		// Platform logs: EnableCaller and EnableStackTrace default to false (zero value)
 	case CategoryBusiness:
 		if result.Level == "" {
 			result.Level = LevelInfo
@@ -304,6 +293,7 @@ func ForCategory(category LogCategory) Logger {
 
 // SyncAll flushes all category loggers.
 // This should be called before program exit.
+// If multiple loggers fail to sync, all errors are returned via errors.Join.
 func SyncAll() error {
 	mgr := getCategoryManager()
 	if mgr == nil {
@@ -321,10 +311,7 @@ func SyncAll() error {
 		errs = append(errs, err)
 	}
 
-	if len(errs) > 0 {
-		return errs[0]
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Biz is an alias for Business() for shorter code.
@@ -383,7 +370,7 @@ func FileMultiCategoryConfig(serviceName, logDir string) *MultiCategoryConfig {
 			Outputs: []OutputConfig{
 				{
 					Type:     OutputTypeFile,
-					Path:     logDir + "/access.log",
+					Path:     filepath.Join(logDir, "access.log"),
 					Format:   FormatJSON,
 					Rotation: DefaultRotationConfig(),
 				},
@@ -395,7 +382,7 @@ func FileMultiCategoryConfig(serviceName, logDir string) *MultiCategoryConfig {
 			Outputs: []OutputConfig{
 				{
 					Type:     OutputTypeFile,
-					Path:     logDir + "/platform.log",
+					Path:     filepath.Join(logDir, "platform.log"),
 					Format:   FormatJSON,
 					Rotation: DefaultRotationConfig(),
 				},
@@ -409,7 +396,7 @@ func FileMultiCategoryConfig(serviceName, logDir string) *MultiCategoryConfig {
 			Outputs: []OutputConfig{
 				{
 					Type:     OutputTypeFile,
-					Path:     logDir + "/app.log",
+					Path:     filepath.Join(logDir, "app.log"),
 					Format:   FormatJSON,
 					Rotation: DefaultRotationConfig(),
 				},
@@ -458,5 +445,4 @@ func resetCategoryManager() {
 	catManagerMu.Lock()
 	defer catManagerMu.Unlock()
 	catManager = nil
-	catInitialized = false
 }

@@ -4,6 +4,8 @@
 **Path:** `nsp-common/pkg/logger/`
 **Date:** 2026-03-03
 **Reviewer:** Claude Code
+**Resolution Date:** 2026-03-03
+**Status:** All issues resolved
 
 ---
 
@@ -31,7 +33,7 @@ compatibility story. A few correctness bugs and several code quality issues need
 
 ### High
 
-**1. `LogAccess` ignores the `context.Context` parameter**
+**1. `LogAccess` ignores the `context.Context` parameter** [RESOLVED]
 
 `LogAccess` accepts a `ctx` but calls `accessLogger.Info/Warn/Error` (not the `Context`
 variants), so trace/span IDs present in the context are silently dropped unless the caller
@@ -66,9 +68,11 @@ default:
 The test `TestLogAccess` passes a context with a trace ID but also copies it manually into
 `entry.TraceID`, which masks the bug.
 
+**Resolution:** Changed to use `InfoContext`/`WarnContext`/`ErrorContext` in `access_middleware.go`.
+
 ---
 
-**2. `catInitialized` bool is dead code**
+**2. `catInitialized` bool is dead code** [RESOLVED]
 
 `catInitialized` is written in `InitMultiCategory` and reset in `resetCategoryManager`, but
 never read anywhere. All callers check `catManager != nil`. This adds confusion about the
@@ -81,11 +85,13 @@ catManagerMu  sync.RWMutex
 catInitialized bool   // never read — remove
 ```
 
+**Resolution:** Removed `catInitialized` variable and its usage in `category.go`.
+
 ---
 
 ### Medium
 
-**3. `SyncAll` silently discards all but the first sync error**
+**3. `SyncAll` silently discards all but the first sync error** [RESOLVED]
 
 When multiple category loggers fail to sync, only the first error is returned. Use
 `errors.Join` (available since Go 1.20) to surface all errors:
@@ -100,9 +106,11 @@ if len(errs) > 0 {
 return errors.Join(errs...)
 ```
 
+**Resolution:** Changed `SyncAll` to use `errors.Join(errs...)` to return all errors.
+
 ---
 
-**4. Global logger set by `InitMultiCategory` lacks the `log_category` field**
+**4. Global logger set by `InitMultiCategory` lacks the `log_category` field** [RESOLVED]
 
 After `InitMultiCategory`, `GetLogger()` returns `businessLogger` (the raw zap logger),
 while `Business()` returns `manager.business` which has `.With(FieldCategory, "business")`
@@ -119,9 +127,11 @@ globalMu.Unlock()
 Fix: set `globalLogger = manager.business` (the one with the `log_category` field already
 attached).
 
+**Resolution:** Changed to `globalLogger = manager.business` to include the category field.
+
 ---
 
-**5. `"query"` raw string literal in `LogAccess`**
+**5. `"query"` raw string literal in `LogAccess`** [RESOLVED]
 
 All other fields in `LogAccess` use typed constants, but the query field uses a bare string:
 
@@ -132,9 +142,11 @@ args = append(args, "query", entry.Query)   // inconsistent
 
 Add `FieldHTTPQuery = "http_query"` to `fields.go` and use it here.
 
+**Resolution:** Added `FieldHTTPQuery = "http_query"` constant to `fields.go` and updated `access_middleware.go` to use it.
+
 ---
 
-**6. `filepath.Join` not used in `FileMultiCategoryConfig`**
+**6. `filepath.Join` not used in `FileMultiCategoryConfig`** [RESOLVED]
 
 String concatenation with `"/"` is not cross-platform:
 
@@ -145,11 +157,13 @@ Path: logDir + "/access.log",
 
 Fix: `filepath.Join(logDir, "access.log")` (requires `import "path/filepath"`).
 
+**Resolution:** Changed all path concatenations to use `filepath.Join()` in `category.go`.
+
 ---
 
 ### Low
 
-**7. Redundant caller/stack-trace default logic for Access and Platform categories**
+**7. Redundant caller/stack-trace default logic for Access and Platform categories** [RESOLVED]
 
 In `buildCategoryLoggerConfig`, the access and platform branches have:
 
@@ -165,9 +179,11 @@ are already `false`. The condition `!catCfg.EnableCaller` can only be true when
 noise without effect. Remove it — the only logic needed is the `catCfg != nil` branch that
 copies values from `catCfg`, which is already handled above.
 
+**Resolution:** Removed redundant default logic blocks for Access and Platform categories.
+
 ---
 
-**8. `AccessLogConfig` is defined but disconnected from `LogAccess`**
+**8. `AccessLogConfig` is defined but disconnected from `LogAccess`** [RESOLVED]
 
 `AccessLogConfig` (with `SkipPaths`, `SlowRequestThreshold`, `IncludeQuery`, etc.) is a
 fully documented struct, but `LogAccess` ignores it entirely. This creates a confusing API:
@@ -178,6 +194,8 @@ Either:
   that returns a bound `LogAccess`-like function, or
 - Document explicitly on `AccessLogConfig` that it is intended for use by framework-specific
   middleware adapters (not yet implemented) and is not consumed by `LogAccess`.
+
+**Resolution:** Added explicit documentation to `AccessLogConfig` explaining that it is intended for use by framework-specific middleware adapters and is not consumed by `LogAccess` directly.
 
 ---
 

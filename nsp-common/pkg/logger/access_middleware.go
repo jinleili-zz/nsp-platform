@@ -59,7 +59,7 @@ func LogAccess(ctx context.Context, entry *AccessLogEntry) {
 	}
 
 	if entry.Query != "" {
-		args = append(args, "query", entry.Query)
+		args = append(args, FieldHTTPQuery, entry.Query)
 	}
 	if entry.UserAgent != "" {
 		args = append(args, FieldUserAgent, entry.UserAgent)
@@ -86,18 +86,23 @@ func LogAccess(ctx context.Context, entry *AccessLogEntry) {
 	// Log at appropriate level based on status code
 	accessLogger := Access()
 	msg := "HTTP Request"
-	
+
 	switch {
 	case entry.Status >= 500:
-		accessLogger.Error(msg, args...)
+		accessLogger.ErrorContext(ctx, msg, args...)
 	case entry.Status >= 400:
-		accessLogger.Warn(msg, args...)
+		accessLogger.WarnContext(ctx, msg, args...)
 	default:
-		accessLogger.Info(msg, args...)
+		accessLogger.InfoContext(ctx, msg, args...)
 	}
 }
 
 // AccessLogConfig holds configuration for the access log middleware.
+//
+// Note: This struct is intended for use by framework-specific middleware adapters
+// (e.g., Gin, Echo, Fiber middleware). The low-level LogAccess function does not
+// consume this configuration directly - it is the responsibility of the middleware
+// adapter to apply these settings when constructing AccessLogEntry instances.
 type AccessLogConfig struct {
 	// SkipPaths is a list of paths to skip logging (e.g., health check endpoints).
 	SkipPaths []string

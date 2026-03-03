@@ -69,6 +69,9 @@ const (
 	// FieldHTTPLatency is the request processing latency in milliseconds
 	FieldHTTPLatency = "http_latency_ms"
 
+	// FieldHTTPQuery is the HTTP request query string
+	FieldHTTPQuery = "http_query"
+
 	// FieldClientIP is the client IP address
 	FieldClientIP = "client_ip"
 
