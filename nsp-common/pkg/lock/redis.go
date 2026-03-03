@@ -299,3 +299,74 @@ func (w *watchdog) Stop() {
 	close(w.stop)
 	<-w.done
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standalone Redis client (single-node, for development and demo use)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// StandaloneRedisOption holds configuration for a single-node Redis client.
+//
+// Intended for local development and demo scenarios where a Redis Cluster is
+// not available. For production use, prefer NewRedisClient with a Redis
+// Cluster.
+type StandaloneRedisOption struct {
+	// Addr is the Redis server address, e.g. "localhost:6379".
+	Addr string
+
+	// Password is the Redis AUTH password. Leave empty when no password is set.
+	Password string
+
+	// PoolSize is the size of the connection pool. Default: 10.
+	PoolSize int
+
+	// DialTimeout is the connection establishment timeout. Default: 5s.
+	DialTimeout time.Duration
+
+	// ReadTimeout is the per-command read timeout. Default: 3s.
+	ReadTimeout time.Duration
+
+	// WriteTimeout is the per-command write timeout. Default: 3s.
+	WriteTimeout time.Duration
+}
+
+// NewStandaloneRedisClient creates a Client backed by redsync + a single Redis
+// node. A Ping is performed to validate connectivity before returning.
+//
+// Use this for local development and demos only. For production, use
+// NewRedisClient which connects to a Redis Cluster.
+func NewStandaloneRedisClient(opt StandaloneRedisOption) (Client, error) {
+	if opt.Addr == "" {
+		return nil, fmt.Errorf("lock: StandaloneRedisOption.Addr must not be empty")
+	}
+
+	if opt.PoolSize == 0 {
+		opt.PoolSize = 10
+	}
+	if opt.DialTimeout == 0 {
+		opt.DialTimeout = 5 * time.Second
+	}
+	if opt.ReadTimeout == 0 {
+		opt.ReadTimeout = 3 * time.Second
+	}
+	if opt.WriteTimeout == 0 {
+		opt.WriteTimeout = 3 * time.Second
+	}
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:         opt.Addr,
+		Password:     opt.Password,
+		PoolSize:     opt.PoolSize,
+		DialTimeout:  opt.DialTimeout,
+		ReadTimeout:  opt.ReadTimeout,
+		WriteTimeout: opt.WriteTimeout,
+	})
+
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		return nil, fmt.Errorf("lock: redis unreachable: %w", err)
+	}
+
+	pool := goredis.NewPool(rdb)
+	rs := redsync.New(pool)
+
+	return &redisClient{rs: rs, client: nil}, nil
+}
