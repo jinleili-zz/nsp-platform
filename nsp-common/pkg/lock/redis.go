@@ -30,14 +30,15 @@ package lock
 import (
 	"context"
 	"fmt"
-	"log"
+	"io"
 	"math/rand"
 	"sync"
 	"time"
 
-	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/go-redsync/redsync/v4"
+	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
+	"github.com/yourorg/nsp-common/pkg/logger"
 )
 
 // RedisOption holds configuration for the Redis Cluster client.
@@ -112,21 +113,24 @@ func NewRedisClient(opt RedisOption) (Client, error) {
 		RouteRandomly:  opt.RouteRandomly,
 	})
 
-	// Validate connectivity.
-	if _, err := clusterClient.ClusterInfo(context.Background()).Result(); err != nil {
+	// Validate connectivity with a bounded timeout.
+	checkCtx, cancel := context.WithTimeout(context.Background(), opt.DialTimeout)
+	defer cancel()
+	if _, err := clusterClient.ClusterInfo(checkCtx).Result(); err != nil {
+		_ = clusterClient.Close()
 		return nil, fmt.Errorf("lock: redis cluster unreachable: %w", err)
 	}
 
 	pool := goredis.NewPool(clusterClient)
 	rs := redsync.New(pool)
 
-	return &redisClient{rs: rs, client: clusterClient}, nil
+	return &redisClient{rs: rs, closer: clusterClient}, nil
 }
 
-// redisClient implements Client using redsync + Redis Cluster.
+// redisClient implements Client using redsync.
 type redisClient struct {
 	rs     *redsync.Redsync
-	client *redis.ClusterClient
+	closer io.Closer // underlying Redis client (ClusterClient or Client)
 }
 
 // New creates a named distributed Lock.
@@ -156,13 +160,43 @@ func (c *redisClient) New(name string, opts ...func(*LockOption)) Lock {
 	}
 }
 
+// Close releases the underlying Redis connection pool.
+func (c *redisClient) Close() error {
+	if c.closer != nil {
+		return c.closer.Close()
+	}
+	return nil
+}
+
 // redisLock implements Lock using a redsync.Mutex.
 type redisLock struct {
-	muMu     sync.Mutex      // protects the mu field during TryAcquire swap
-	mu       *redsync.Mutex  // underlying redsync lock instance
-	opt      LockOption      // options supplied at creation time
-	watchdog *watchdog       // non-nil when auto-renewal is active
-	rs       *redsync.Redsync // used by TryAcquire to create a temporary instance
+	muMu sync.Mutex         // protects mu and wd fields
+	mu   *redsync.Mutex     // underlying redsync lock instance
+	wd   *watchdog          // non-nil when auto-renewal is active
+	opt  LockOption         // options supplied at creation time
+	rs   *redsync.Redsync   // used by TryAcquire to create a temporary instance
+}
+
+// startWatchdog starts the watchdog goroutine if EnableWatchdog is true.
+// Must be called with muMu held.
+func (l *redisLock) startWatchdog() {
+	if !l.opt.EnableWatchdog {
+		return
+	}
+	// Stop an existing watchdog if Acquire is called again without Release.
+	if l.wd != nil {
+		l.wd.Stop()
+		l.wd = nil
+	}
+	interval := l.opt.TTL / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	l.wd = newWatchdog(interval, func() error {
+		return l.Renew(context.Background())
+	}, func(format string, args ...any) {
+		logger.Warn(fmt.Sprintf(format, args...))
+	})
 }
 
 // Acquire blocks until the lock is obtained or ctx is done.
@@ -178,15 +212,9 @@ func (l *redisLock) Acquire(ctx context.Context) error {
 		return ErrNotAcquired
 	}
 
-	if l.opt.EnableWatchdog {
-		interval := l.opt.TTL / 3
-		if interval < time.Second {
-			interval = time.Second
-		}
-		l.watchdog = newWatchdog(interval, func() error {
-			return l.Renew(context.Background())
-		})
-	}
+	l.muMu.Lock()
+	l.startWatchdog()
+	l.muMu.Unlock()
 
 	return nil
 }
@@ -211,6 +239,7 @@ func (l *redisLock) TryAcquire(ctx context.Context) error {
 	// Replace mu atomically so future Release/Renew use the new token.
 	l.muMu.Lock()
 	l.mu = tempMu
+	l.startWatchdog()
 	l.muMu.Unlock()
 
 	return nil
@@ -218,14 +247,15 @@ func (l *redisLock) TryAcquire(ctx context.Context) error {
 
 // Release releases the lock.
 func (l *redisLock) Release(ctx context.Context) error {
-	if l.watchdog != nil {
-		l.watchdog.Stop()
-		l.watchdog = nil
-	}
-
 	l.muMu.Lock()
+	wd := l.wd
+	l.wd = nil
 	mu := l.mu
 	l.muMu.Unlock()
+
+	if wd != nil {
+		wd.Stop()
+	}
 
 	if ok, err := mu.UnlockContext(ctx); !ok || err != nil {
 		return ErrLockExpired
@@ -267,9 +297,10 @@ type watchdog struct {
 // interval is clamped to a minimum of 1s to prevent excessive renewal
 // frequency when TTL is very short.
 //
-// Renewal failures are logged but do not stop the goroutine; the next tick
-// will retry. The goroutine exits when Stop is called.
-func newWatchdog(interval time.Duration, renewFn func() error) *watchdog {
+// logFn is used to report renewal failures. Renewal failures do not stop
+// the goroutine; the next tick will retry. The goroutine exits when Stop
+// is called.
+func newWatchdog(interval time.Duration, renewFn func() error, logFn func(string, ...any)) *watchdog {
 	if interval < time.Second {
 		interval = time.Second
 	}
@@ -285,7 +316,7 @@ func newWatchdog(interval time.Duration, renewFn func() error) *watchdog {
 				return
 			case <-time.After(interval):
 				if err := renewFn(); err != nil {
-					log.Printf("lock watchdog: renew failed: %v", err)
+					logFn("lock watchdog: renew failed: %v", err)
 					// Do not exit; attempt again on the next tick.
 				}
 			}
@@ -361,12 +392,16 @@ func NewStandaloneRedisClient(opt StandaloneRedisOption) (Client, error) {
 		WriteTimeout: opt.WriteTimeout,
 	})
 
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
+	// Validate connectivity with a bounded timeout.
+	checkCtx, cancel := context.WithTimeout(context.Background(), opt.DialTimeout)
+	defer cancel()
+	if err := rdb.Ping(checkCtx).Err(); err != nil {
+		_ = rdb.Close()
 		return nil, fmt.Errorf("lock: redis unreachable: %w", err)
 	}
 
 	pool := goredis.NewPool(rdb)
 	rs := redsync.New(pool)
 
-	return &redisClient{rs: rs, client: nil}, nil
+	return &redisClient{rs: rs, closer: rdb}, nil
 }

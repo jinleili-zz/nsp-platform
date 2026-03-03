@@ -51,6 +51,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "连接 Redis 失败: %v\n", err)
 		os.Exit(1)
 	}
+	defer client.Close()
 
 	demoBasicAcquireRelease(client)
 	demoTryAcquireFail(client)

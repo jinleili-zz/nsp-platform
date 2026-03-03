@@ -41,6 +41,10 @@ type Client interface {
 	// The same name may be passed to New multiple times; each call returns
 	// an independent Lock instance backed by its own token.
 	New(name string, opts ...func(*LockOption)) Lock
+
+	// Close releases the underlying connection pool and associated resources.
+	// Should be called during graceful shutdown.
+	Close() error
 }
 
 // Lock is the distributed lock interface.
@@ -117,6 +121,7 @@ Usage example:
   if err != nil {
       panic(err)
   }
+  defer client.Close()
 
   // Create a lock (recommended naming: {domain}:{resource_type}:{resource_id}).
   l := client.New("order:pay:ORD-123",

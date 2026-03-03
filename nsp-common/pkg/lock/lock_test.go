@@ -62,7 +62,7 @@ func getMiniRedis(t *testing.T) (*miniredis.Miniredis, Client) {
 
 	c := &redisClient{
 		rs:     rs,
-		client: nil, // ClusterClient not needed for single-node tests
+		closer: nil, // no real client to close for single-node tests
 	}
 	return mr, c
 }
