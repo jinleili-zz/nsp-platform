@@ -17,6 +17,7 @@ import (
 type Store interface {
 	// Transaction operations
 	CreateTransaction(ctx context.Context, tx *Transaction) error
+	CreateTransactionWithSteps(ctx context.Context, tx *Transaction, steps []*Step) error
 	GetTransaction(ctx context.Context, id string) (*Transaction, error)
 	UpdateTransactionStatus(ctx context.Context, id string, status TxStatus, lastError string) error
 	UpdateTransactionStep(ctx context.Context, id string, currentStep int) error
@@ -78,6 +79,106 @@ func (s *PostgresStore) CreateTransaction(ctx context.Context, tx *Transaction) 
 	if err != nil {
 		return fmt.Errorf("failed to create transaction: %w", err)
 	}
+	return nil
+}
+
+// CreateTransactionWithSteps creates a transaction and its steps atomically in a single database transaction.
+// This ensures no orphan transactions exist if step creation fails.
+func (s *PostgresStore) CreateTransactionWithSteps(ctx context.Context, tx *Transaction, steps []*Step) error {
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer dbTx.Rollback()
+
+	// Create transaction
+	payloadJSON, err := json.Marshal(tx.Payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	txQuery := `
+		INSERT INTO saga_transactions (id, status, payload, current_step, created_at, updated_at, timeout_at, retry_count, last_error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+	_, err = dbTx.ExecContext(ctx, txQuery,
+		tx.ID,
+		string(tx.Status),
+		payloadJSON,
+		tx.CurrentStep,
+		tx.CreatedAt,
+		tx.UpdatedAt,
+		tx.TimeoutAt,
+		tx.RetryCount,
+		tx.LastError,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create transaction: %w", err)
+	}
+
+	// Create steps
+	if len(steps) > 0 {
+		stepQuery := `
+			INSERT INTO saga_steps (
+				id, transaction_id, step_index, name, step_type, status,
+				action_method, action_url, action_payload,
+				compensate_method, compensate_url, compensate_payload,
+				poll_url, poll_method, poll_interval_sec, poll_max_times,
+				poll_success_path, poll_success_value, poll_failure_path, poll_failure_value,
+				max_retry
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		`
+
+		stmt, err := dbTx.PrepareContext(ctx, stepQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+
+		for _, step := range steps {
+			actionPayloadJSON, err := json.Marshal(step.ActionPayload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal action payload: %w", err)
+			}
+
+			compensatePayloadJSON, err := json.Marshal(step.CompensatePayload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal compensate payload: %w", err)
+			}
+
+			_, err = stmt.ExecContext(ctx,
+				step.ID,
+				step.TransactionID,
+				step.Index,
+				step.Name,
+				string(step.Type),
+				string(step.Status),
+				step.ActionMethod,
+				step.ActionURL,
+				actionPayloadJSON,
+				step.CompensateMethod,
+				step.CompensateURL,
+				compensatePayloadJSON,
+				step.PollURL,
+				step.PollMethod,
+				step.PollIntervalSec,
+				step.PollMaxTimes,
+				step.PollSuccessPath,
+				step.PollSuccessValue,
+				step.PollFailurePath,
+				step.PollFailureValue,
+				step.MaxRetry,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create step %s: %w", step.ID, err)
+			}
+		}
+	}
+
+	if err := dbTx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	return nil
 }
 

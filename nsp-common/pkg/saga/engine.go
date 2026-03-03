@@ -219,11 +219,13 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 	txID := uuid.New().String()
 	def.ID = txID
 
-	// Extract trace context and store in payload for propagation
-	payload := def.Payload
-	if payload == nil {
-		payload = make(map[string]any)
+	// Deep copy payload to avoid modifying caller's map
+	payload := make(map[string]any, len(def.Payload)+2)
+	for k, v := range def.Payload {
+		payload[k] = v
 	}
+
+	// Extract trace context and store in payload for propagation
 	if tc, ok := trace.TraceFromContext(ctx); ok && tc != nil {
 		payload["_trace_id"] = tc.TraceID
 		payload["_span_id"] = tc.SpanId
@@ -244,11 +246,6 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 	if def.TimeoutSec > 0 {
 		timeoutAt := now.Add(time.Duration(def.TimeoutSec) * time.Second)
 		tx.TimeoutAt = &timeoutAt
-	}
-
-	// Save transaction
-	if err := e.store.CreateTransaction(ctx, tx); err != nil {
-		return "", fmt.Errorf("failed to create transaction: %w", err)
 	}
 
 	// Create step records
@@ -280,8 +277,9 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 		}
 	}
 
-	if err := e.store.CreateSteps(ctx, steps); err != nil {
-		return "", fmt.Errorf("failed to create steps: %w", err)
+	// Create transaction and steps atomically in a single database transaction
+	if err := e.store.CreateTransactionWithSteps(ctx, tx, steps); err != nil {
+		return "", fmt.Errorf("failed to create transaction: %w", err)
 	}
 
 	// Submit to coordinator for execution
