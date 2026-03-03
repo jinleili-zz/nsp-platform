@@ -53,3 +53,69 @@ const (
 	// Example: client IP address, downstream service address.
 	FieldPeerAddr = "peer_addr"
 )
+
+// Access log specific field constants.
+// These fields are typically used in HTTP access logs.
+const (
+	// FieldHTTPMethod is the HTTP request method (GET, POST, PUT, DELETE, etc.)
+	FieldHTTPMethod = "http_method"
+
+	// FieldHTTPPath is the HTTP request path
+	FieldHTTPPath = "http_path"
+
+	// FieldHTTPStatus is the HTTP response status code
+	FieldHTTPStatus = "http_status"
+
+	// FieldHTTPLatency is the request processing latency in milliseconds
+	FieldHTTPLatency = "http_latency_ms"
+
+	// FieldClientIP is the client IP address
+	FieldClientIP = "client_ip"
+
+	// FieldUserAgent is the client user agent string
+	FieldUserAgent = "user_agent"
+
+	// FieldRequestSize is the request body size in bytes
+	FieldRequestSize = "request_size"
+
+	// FieldResponseSize is the response body size in bytes
+	FieldResponseSize = "response_size"
+
+	// FieldReferer is the HTTP referer header
+	FieldReferer = "referer"
+)
+
+// Platform log specific field constants.
+// These fields are typically used in framework/infrastructure logs.
+const (
+	// FieldComponent is the platform component name
+	// Example: "asynq", "saga", "redis", "postgres"
+	FieldComponent = "component"
+
+	// FieldTaskType is the async task type
+	FieldTaskType = "task_type"
+
+	// FieldTaskID is the async task ID
+	FieldTaskID = "task_id"
+
+	// FieldQueue is the queue name
+	FieldQueue = "queue"
+
+	// FieldWorkerID is the worker identifier
+	FieldWorkerID = "worker_id"
+
+	// FieldRetryCount is the retry count for failed operations
+	FieldRetryCount = "retry_count"
+
+	// FieldWorkflowID is the workflow/saga instance ID
+	FieldWorkflowID = "workflow_id"
+
+	// FieldStepName is the workflow step name
+	FieldStepName = "step_name"
+)
+
+// Log category field constant.
+const (
+	// FieldCategory is the log category (access, platform, business)
+	FieldCategory = "category"
+)
