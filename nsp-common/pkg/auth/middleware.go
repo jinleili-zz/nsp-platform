@@ -3,6 +3,7 @@ package auth
 
 import (
 	"context"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -135,7 +136,7 @@ func NewSkipperByPathPrefix(prefixes ...string) func(c *gin.Context) bool {
 	return func(c *gin.Context) bool {
 		path := c.Request.URL.Path
 		for _, prefix := range prefixes {
-			if len(path) >= len(prefix) && path[:len(prefix)] == prefix {
+			if strings.HasPrefix(path, prefix) {
 				return true
 			}
 		}

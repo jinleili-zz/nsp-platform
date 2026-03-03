@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -369,8 +370,8 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 func (e *Executor) handleHTTPError(ctx context.Context, step *Step, err error) error {
 	// Increment retry count
 	if incrementErr := e.store.IncrementStepRetry(ctx, step.ID); incrementErr != nil {
-		// Log but don't fail
-		fmt.Printf("failed to increment retry count: %v\n", incrementErr)
+		// Log but don't fail - use log package for structured logging capability
+		log.Printf("[saga] failed to increment retry count for step %s: %v", step.ID, incrementErr)
 	}
 	step.RetryCount++
 

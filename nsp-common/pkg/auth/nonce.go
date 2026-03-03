@@ -24,7 +24,10 @@ type nonceEntry struct {
 
 // MemoryNonceStore is an in-memory implementation of NonceStore.
 // It uses a background goroutine to periodically clean up expired nonces.
-// For production environments, consider using a Redis-based implementation.
+//
+// WARNING: For production multi-instance deployments, use a Redis-based
+// implementation. MemoryNonceStore does not share state across instances,
+// which means replay protection is ineffective when requests hit different instances.
 type MemoryNonceStore struct {
 	mu      sync.Mutex
 	nonces  map[string]nonceEntry
@@ -44,26 +47,29 @@ func NewMemoryNonceStore() *MemoryNonceStore {
 }
 
 // CheckAndStore checks if a nonce has been used and stores it if not.
-// Returns (true, nil) if the nonce has already been used within the TTL period.
+// Returns (true, nil) if the nonce has already been used (replay attack detected).
 // Returns (false, nil) if the nonce is new and has been successfully stored.
+//
+// Security note: Even expired nonces are rejected to prevent replay attacks
+// where an attacker waits for the nonce TTL to expire before replaying.
+// Nonces are kept for 2x TTL before being cleaned up.
 func (s *MemoryNonceStore) CheckAndStore(ctx context.Context, nonce string, ttl time.Duration) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now()
 
-	// Check if nonce exists and is not expired
-	if entry, exists := s.nonces[nonce]; exists {
-		if now.Before(entry.expiresAt) {
-			// Nonce exists and is not expired - it's a replay attack
-			return true, nil
-		}
-		// Nonce exists but is expired - treat as new nonce
+	// Check if nonce exists - reject both active AND recently expired nonces
+	// to prevent replay attacks where attacker waits for TTL to expire
+	if _, exists := s.nonces[nonce]; exists {
+		// Nonce was used before - this is a replay attack
+		return true, nil
 	}
 
-	// Store the nonce with expiration time
+	// Store the nonce with extended expiration time (2x TTL) for safety margin
+	// This ensures nonces are kept long enough to detect delayed replay attempts
 	s.nonces[nonce] = nonceEntry{
-		expiresAt: now.Add(ttl),
+		expiresAt: now.Add(ttl * 2),
 	}
 
 	return false, nil

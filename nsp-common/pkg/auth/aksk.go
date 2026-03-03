@@ -48,6 +48,10 @@ const (
 
 	// DefaultNonceTTL is the default time-to-live for nonce storage.
 	DefaultNonceTTL = 15 * time.Minute
+
+	// MaxRequestBodySize is the maximum request body size for signature computation.
+	// Requests exceeding this size will return an error.
+	MaxRequestBodySize = 10 * 1024 * 1024 // 10MB
 )
 
 // Sentinel errors for authentication failures.
@@ -75,6 +79,9 @@ var (
 
 	// ErrSignatureMismatch is returned when the signature verification fails.
 	ErrSignatureMismatch = errors.New("signature does not match")
+
+	// ErrBodyTooLarge is returned when the request body exceeds the maximum allowed size.
+	ErrBodyTooLarge = errors.New("request body exceeds maximum allowed size")
 )
 
 // Signer provides client-side request signing functionality.
@@ -120,11 +127,6 @@ func (s *Signer) Sign(req *http.Request) error {
 	// Step 4: Determine and set signed headers
 	signedHeaders := DefaultSignedHeaders
 	req.Header.Set(HeaderSignedHeaders, signedHeaders)
-
-	// Ensure Content-Type is set (default to empty string if not present)
-	if req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "")
-	}
 
 	// Step 5: Build StringToSign
 	stringToSign := buildStringToSign(req, signedHeaders, bodyHash)
@@ -263,13 +265,20 @@ func generateNonce(byteLen int) (string, error) {
 
 // hashRequestBody reads the request body, computes its SHA256 hash,
 // and restores the body for further reading.
+// Returns ErrBodyTooLarge if the body exceeds MaxRequestBodySize.
 func hashRequestBody(req *http.Request) (string, error) {
 	var bodyBytes []byte
 	if req.Body != nil {
 		var err error
-		bodyBytes, err = io.ReadAll(req.Body)
+		// Limit read to prevent memory exhaustion from oversized requests
+		limitedReader := io.LimitReader(req.Body, MaxRequestBodySize+1)
+		bodyBytes, err = io.ReadAll(limitedReader)
 		if err != nil {
 			return "", err
+		}
+		// Check if body exceeded the limit
+		if len(bodyBytes) > MaxRequestBodySize {
+			return "", ErrBodyTooLarge
 		}
 		// Restore the body
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))

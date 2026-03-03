@@ -37,9 +37,9 @@ func isValidHexString(s string, expectedLen int) bool {
 // Extract 从入站 HTTP 请求中提取 TraceContext
 //
 // TraceID 来源优先级：
-//  1. X-B3-TraceId 有值 → 直接使用（链路中间节点）
-//  2. X-B3-TraceId 无值但 X-Request-Id 有值 → 用 X-Request-Id 作为 TraceID
-//  3. 两者都无 → 生成新 TraceID（入口节点，root span）
+//  1. X-B3-TraceId 有值且为有效 32 位 hex → 直接使用（链路中间节点）
+//  2. X-Request-Id 有值且为有效 32 位 hex → 用作 TraceID（兼容网关）
+//  3. 以上都不满足 → 生成新 TraceID（入口节点，root span）
 //
 // SpanId：始终为本服务生成新的 SpanId，不复用任何请求头中的值
 // ParentSpanId：直接赋值为请求头中 X-B3-SpanId 的值（上游的 SpanId）
@@ -51,24 +51,17 @@ func Extract(r *http.Request, instanceId string) *TraceContext {
 	}
 
 	// 1. 提取 TraceID（优先级：X-B3-TraceId > X-Request-Id > 新生成）
+	// 要求必须是有效的 32 位 hex 字符串，否则生成新 ID 以保证格式一致性
 	traceID := r.Header.Get(HeaderTraceID)
 	if traceID != "" && isValidHexString(traceID, 32) {
 		tc.TraceID = traceID
 	} else {
-		// 尝试使用 X-Request-Id
+		// 尝试使用 X-Request-Id（仅接受有效 32 位 hex 格式）
 		requestID := r.Header.Get(HeaderRequestID)
 		if requestID != "" && isValidHexString(requestID, 32) {
 			tc.TraceID = requestID
-		} else if requestID != "" {
-			// X-Request-Id 存在但格式不对，仍然使用它（兼容性考虑）
-			// 但如果太长或太短，则生成新的
-			if len(requestID) <= 32 {
-				tc.TraceID = requestID
-			} else {
-				tc.TraceID = NewTraceID()
-			}
 		} else {
-			// 都没有，生成新的 TraceID
+			// 格式不符合要求，生成新的 TraceID
 			tc.TraceID = NewTraceID()
 		}
 	}

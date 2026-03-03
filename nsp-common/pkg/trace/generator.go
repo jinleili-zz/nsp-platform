@@ -5,8 +5,22 @@ package trace
 import (
 	"crypto/rand"
 	"encoding/hex"
+	mathrand "math/rand"
 	"os"
+	"sync"
+	"time"
 )
+
+var (
+	fallbackRandOnce sync.Once
+)
+
+// initFallbackRand initializes math/rand with a time-based seed for fallback.
+func initFallbackRand() {
+	fallbackRandOnce.Do(func() {
+		mathrand.Seed(time.Now().UnixNano())
+	})
+}
 
 // NewTraceID 生成 32 位 hex 字符串的 TraceID（16字节随机数）
 // 格式与 B3 标准一致（128bit）
@@ -15,9 +29,12 @@ func NewTraceID() string {
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
 	if err != nil {
-		// 在极端情况下使用时间戳和进程 ID 作为 fallback
-		// 但这种情况几乎不会发生
-		panic("crypto/rand read failed: " + err.Error())
+		// Fallback to math/rand if crypto/rand fails (e.g., /dev/random exhausted)
+		// This is acceptable for trace IDs which don't require cryptographic security
+		initFallbackRand()
+		for i := range b {
+			b[i] = byte(mathrand.Intn(256))
+		}
 	}
 	return hex.EncodeToString(b)
 }
@@ -29,7 +46,11 @@ func NewSpanId() string {
 	b := make([]byte, 8)
 	_, err := rand.Read(b)
 	if err != nil {
-		panic("crypto/rand read failed: " + err.Error())
+		// Fallback to math/rand if crypto/rand fails
+		initFallbackRand()
+		for i := range b {
+			b[i] = byte(mathrand.Intn(256))
+		}
 	}
 	return hex.EncodeToString(b)
 }
