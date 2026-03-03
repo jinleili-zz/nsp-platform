@@ -2,6 +2,12 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
+// 本次改动：
+// 1. 删除 Unmarshal 方法和 UnmarshalFunc 类型
+// 2. OnChange 回调参数由 func(UnmarshalFunc) 改为 func(apply func(any) error)
+// 3. 更新 OnChange godoc 注释，说明 apply 参数的语义
+// 4. 更新文件末尾的使用示例
+
 // Package config provides a unified configuration management SDK
 // that encapsulates spf13/viper as the underlying implementation.
 //
@@ -17,25 +23,29 @@ type Loader interface {
 	// Each call will re-read the file content.
 	Load(target any) error
 
-	// Unmarshal unmarshals the current in-memory configuration into target (must be a pointer).
-	// Used in hot-reload callbacks to get the latest configuration without re-reading the file.
-	Unmarshal(target any) error
-
 	// OnChange registers a configuration change callback.
-	// After the file changes and is successfully reloaded, all registered callbacks
-	// are triggered in registration order.
-	// The callback parameter UnmarshalFunc can be used to get the latest configuration.
-	// Callbacks are executed in separate goroutines, and the wrapper layer ensures concurrency safety.
-	OnChange(fn func(unmarshal UnmarshalFunc))
+	//
+	// After the configuration source changes and is successfully reloaded,
+	// all registered callbacks are triggered in registration order.
+	//
+	// The apply function passed to each callback is provided by the wrapper layer.
+	// Calling apply(&cfg) deserializes the latest configuration into cfg.
+	// Business code does not need to know whether the underlying source is a
+	// watched file, a configuration center push (Nacos/Apollo), or any other
+	// mechanism – the wrapper layer handles the details.
+	//
+	// Callbacks are executed sequentially in a single goroutine.
+	// A panic in one callback is recovered so that subsequent callbacks still run.
+	//
+	// If Watch=false, registering a callback does not error, but it will never
+	// be triggered.
+	OnChange(apply func(func(any) error))
 
-	// Close stops file watching and releases file descriptors and other resources.
-	// Should be called during graceful shutdown or at the end of test cases.
+	// Close stops configuration watching and releases associated resources
+	// (file descriptors, background goroutines, etc.).
+	// Should be called during graceful shutdown and at the end of test cases.
 	Close()
 }
-
-// UnmarshalFunc is the function signature for getting the latest configuration
-// in hot-reload callbacks.
-type UnmarshalFunc func(target any) error
 
 // Option contains configuration options for creating a Loader.
 type Option struct {
@@ -79,12 +89,12 @@ func New(opt Option) (Loader, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Start watching if enabled
 	if opt.Watch {
 		loader.startWatching()
 	}
-	
+
 	return loader, nil
 }
 
@@ -120,12 +130,13 @@ func main() {
         panic(err)
     }
 
-    // Register hot-reload callback
-    // The callback decides internally how to use the new configuration.
-    // The wrapper layer does not intervene.
-    loader.OnChange(func(unmarshal config.UnmarshalFunc) {
+    // Register hot-reload callback.
+    // apply is provided by the wrapper layer; calling apply(&newCfg) deserializes
+    // the latest configuration regardless of whether the source is a file,
+    // Nacos, Apollo, or any other backend.
+    loader.OnChange(func(apply func(target any) error) {
         var newCfg AppConfig
-        if err := unmarshal(&newCfg); err != nil {
+        if err := apply(&newCfg); err != nil {
             // New configuration parsing failed, log error and continue using old configuration
             return
         }

@@ -2,6 +2,11 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
+// 本次改动：
+// 1. 删除 Test_Unmarshal_AfterLoad（对应已删除的 Unmarshal 方法）
+// 2. 所有热更新测试的回调参数由 func(UnmarshalFunc) 改为 func(apply func(any) error)
+// 3. 删除所有涉及 UnmarshalFunc 类型的代码
+
 package config
 
 import (
@@ -255,45 +260,6 @@ func Test_Load_FileNotFound(t *testing.T) {
 	}
 }
 
-// Test_Unmarshal_AfterLoad tests that Unmarshal after Load produces consistent results.
-func Test_Unmarshal_AfterLoad(t *testing.T) {
-	content := `
-server:
-  host: localhost
-  port: 8080
-debug: true
-`
-	file := createTempConfigFile(t, "config.yaml", content)
-	defer os.Remove(file)
-
-	loader, err := New(Option{
-		ConfigFile: file,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	defer loader.Close()
-
-	var cfg1, cfg2 AppConfig
-	if err := loader.Load(&cfg1); err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if err := loader.Unmarshal(&cfg2); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-
-	if cfg1.Server.Host != cfg2.Server.Host {
-		t.Errorf("Server.Host mismatch: %v vs %v", cfg1.Server.Host, cfg2.Server.Host)
-	}
-	if cfg1.Server.Port != cfg2.Server.Port {
-		t.Errorf("Server.Port mismatch: %v vs %v", cfg1.Server.Port, cfg2.Server.Port)
-	}
-	if cfg1.Debug != cfg2.Debug {
-		t.Errorf("Debug mismatch: %v vs %v", cfg1.Debug, cfg2.Debug)
-	}
-}
-
 // Test_OnChange_Triggered tests that OnChange callback is triggered when file changes.
 func Test_OnChange_Triggered(t *testing.T) {
 	content1 := `
@@ -321,9 +287,9 @@ debug: true
 	changed := make(chan struct{}, 1)
 	var newCfg AppConfig
 
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
-		if err := unmarshal(&newCfg); err != nil {
-			t.Errorf("unmarshal in callback error = %v", err)
+	loader.OnChange(func(apply func(any) error) {
+		if err := apply(&newCfg); err != nil {
+			t.Errorf("apply in callback error = %v", err)
 			return
 		}
 		changed <- struct{}{}
@@ -371,13 +337,13 @@ func Test_OnChange_MultipleCallbacks(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	// First callback
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		callOrder = append(callOrder, 1)
 		done <- struct{}{}
 	})
 
 	// Second callback
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		callOrder = append(callOrder, 2)
 		done <- struct{}{}
 	})
@@ -424,7 +390,7 @@ func Test_OnChange_WatchFalse(t *testing.T) {
 	defer loader.Close()
 
 	callbackCalled := false
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		callbackCalled = true
 	})
 
@@ -456,7 +422,7 @@ func Test_Close_StopsWatch(t *testing.T) {
 	}
 
 	callbackCalled := false
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		callbackCalled = true
 	})
 
@@ -497,14 +463,14 @@ func Test_OnChange_PanicRecovery(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	// First callback - will panic
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		defer func() { done <- struct{}{} }()
 		panicked = true
 		panic("test panic")
 	})
 
 	// Second callback - should still execute
-	loader.OnChange(func(unmarshal UnmarshalFunc) {
+	loader.OnChange(func(apply func(any) error) {
 		defer func() { done <- struct{}{} }()
 		executed = true
 	})

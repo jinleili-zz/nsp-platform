@@ -2,6 +2,12 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 
+// 本次改动：
+// 1. callbacks 字段类型由 []func(UnmarshalFunc) 改为 []func(func(any) error)
+// 2. OnChange 方法签名同步修改
+// 3. startWatching 中 applyFn 替代 unmarshalFn，回调调用方式同步修改
+// 4. 删除 Unmarshal 方法实现
+
 package config
 
 import (
@@ -15,10 +21,10 @@ import (
 
 // viperLoader implements the Loader interface using spf13/viper as the underlying library.
 type viperLoader struct {
-	v         *viper.Viper          // viper instance
-	mu        sync.RWMutex          // protects callbacks list and hot-reload concurrency
-	callbacks []func(UnmarshalFunc) // registered change callbacks
-	done      chan struct{}         // signal channel for Close
+	v         *viper.Viper              // viper instance
+	mu        sync.RWMutex              // protects callbacks list and hot-reload concurrency
+	callbacks []func(func(any) error)   // registered change callbacks
+	done      chan struct{}              // signal channel for Close
 }
 
 // newViperLoader creates a new viperLoader instance.
@@ -76,20 +82,12 @@ func (l *viperLoader) Load(target any) error {
 	return l.v.UnmarshalExact(target)
 }
 
-// Unmarshal unmarshals the current in-memory configuration into target.
-// Does not re-read the file, used in hot-reload callbacks.
-func (l *viperLoader) Unmarshal(target any) error {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.v.Unmarshal(target)
-}
-
 // OnChange registers a configuration change callback.
 // If Watch=false, registering callbacks does not error but they will never be triggered.
-func (l *viperLoader) OnChange(fn func(UnmarshalFunc)) {
+func (l *viperLoader) OnChange(apply func(func(any) error)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.callbacks = append(l.callbacks, fn)
+	l.callbacks = append(l.callbacks, apply)
 }
 
 // Close stops file watching and releases resources.
@@ -118,31 +116,33 @@ func (l *viperLoader) startWatching() {
 
 		// Acquire write lock to protect callbacks list
 		l.mu.Lock()
-		
-		// Create unmarshal function that holds read lock
-		unmarshalFn := func(target any) error {
+
+		// applyFn is provided to each callback so that it can deserialize the
+		// latest in-memory configuration. It holds a read lock to ensure the
+		// viper state is not modified while unmarshalling.
+		applyFn := func(target any) error {
 			l.mu.RLock()
 			defer l.mu.RUnlock()
 			return l.v.Unmarshal(target)
 		}
-		
+
 		// Copy callbacks to avoid holding lock during execution
-		callbacks := make([]func(UnmarshalFunc), len(l.callbacks))
+		callbacks := make([]func(func(any) error), len(l.callbacks))
 		copy(callbacks, l.callbacks)
 		l.mu.Unlock()
 
-		// Execute callbacks in registration order
-		// Individual callback panics are recovered to ensure subsequent callbacks execute
+		// Execute callbacks in registration order.
+		// Individual callback panics are recovered to ensure subsequent callbacks execute.
 		for _, cb := range callbacks {
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						// Log panic but continue executing remaining callbacks
-						// Cannot use logger here to avoid dependency cycle
+						// Log panic but continue executing remaining callbacks.
+						// Cannot use logger here to avoid dependency cycle.
 						fmt.Printf("config callback panic recovered: %v\n", r)
 					}
 				}()
-				cb(unmarshalFn)
+				cb(applyFn)
 			}()
 		}
 	})
