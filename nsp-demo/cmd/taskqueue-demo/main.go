@@ -18,20 +18,27 @@ import (
 	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
-const (
-	// Redis cluster nodes (host-mapped ports)
-	redisNode1 = "127.0.0.1:7001"
-	redisNode2 = "127.0.0.1:7002"
-	redisNode3 = "127.0.0.1:7003"
+var (
+	// Redis cluster nodes - read from environment or use defaults for local development
+	redisNode1 = getEnv("REDIS_NODE_1", "127.0.0.1:7001")
+	redisNode2 = getEnv("REDIS_NODE_2", "127.0.0.1:7002")
+	redisNode3 = getEnv("REDIS_NODE_3", "127.0.0.1:7003")
 
-	// PostgreSQL DSN
-	pgDSN = "postgres://saga:saga123@127.0.0.1:5432/taskqueue_test?sslmode=disable"
+	// PostgreSQL DSN - read from environment
+	pgDSN = getEnv("PG_DSN", "postgres://saga:saga123@127.0.0.1:5432/taskqueue_test?sslmode=disable")
 
 	// Queue names
 	callbackQueue = "demo_callbacks"
 	switchQueue   = "demo_tasks_switch"
 	firewallQueue = "demo_tasks_firewall"
 )
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 func redisClusterOpt() asynq.RedisClusterClientOpt {
 	return asynq.RedisClusterClientOpt{

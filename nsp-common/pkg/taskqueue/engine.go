@@ -296,9 +296,18 @@ func (e *Engine) NewCallbackSender() *CallbackSender {
 
 // enqueueStep publishes a step to the message queue.
 func (e *Engine) enqueueStep(ctx context.Context, step *StepTask) error {
+	// Fetch workflow to get the business resource ID
+	wf, err := e.store.GetWorkflow(ctx, step.WorkflowID)
+	if err != nil {
+		return fmt.Errorf("failed to get workflow for resource_id: %w", err)
+	}
+	if wf == nil {
+		return fmt.Errorf("workflow not found: %s", step.WorkflowID)
+	}
+
 	payload := map[string]interface{}{
 		"task_id":     step.ID,
-		"resource_id": step.WorkflowID,
+		"resource_id": wf.ResourceID, // Use business resource ID, not workflow UUID
 		"task_params": step.Params,
 	}
 	payloadData, err := json.Marshal(payload)
@@ -356,6 +365,29 @@ func (e *Engine) handleStepSuccess(ctx context.Context, step *StepTask) error {
 }
 
 func (e *Engine) handleStepFailure(ctx context.Context, step *StepTask, errorMsg string) error {
+	// Check if we should retry
+	if step.RetryCount < step.MaxRetries {
+		// Increment retry count
+		if err := e.store.IncrementStepRetryCount(ctx, step.ID); err != nil {
+			return fmt.Errorf("failed to increment retry count: %w", err)
+		}
+		step.RetryCount++
+
+		// Reset step status and re-enqueue
+		if err := e.store.UpdateStepStatus(ctx, step.ID, StepStatusPending); err != nil {
+			return fmt.Errorf("failed to reset step status for retry: %w", err)
+		}
+
+		if err := e.enqueueStep(ctx, step); err != nil {
+			return fmt.Errorf("failed to re-enqueue step for retry: %w", err)
+		}
+
+		log.Printf("[taskqueue] step retry scheduled: id=%s, retry=%d/%d, error=%s",
+			step.ID, step.RetryCount, step.MaxRetries, errorMsg)
+		return nil
+	}
+
+	// No more retries, mark workflow as failed
 	if err := e.store.IncrementFailedSteps(ctx, step.WorkflowID); err != nil {
 		return fmt.Errorf("failed to increment failed steps: %w", err)
 	}
@@ -364,20 +396,18 @@ func (e *Engine) handleStepFailure(ctx context.Context, step *StepTask, errorMsg
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
 
-	log.Printf("[taskqueue] workflow failed: id=%s, step=%s, error=%s", step.WorkflowID, step.TaskName, errorMsg)
+	log.Printf("[taskqueue] workflow failed: id=%s, step=%s, retries_exhausted=%d, error=%s",
+		step.WorkflowID, step.TaskName, step.MaxRetries, errorMsg)
 	return nil
 }
 
 func (e *Engine) checkAndCompleteWorkflow(ctx context.Context, workflowID string) error {
-	stats, err := e.store.GetStepStats(ctx, workflowID)
+	// Use atomic conditional update to avoid TOCTOU race condition
+	completed, err := e.store.TryCompleteWorkflow(ctx, workflowID)
 	if err != nil {
-		return fmt.Errorf("failed to get step stats: %w", err)
+		return fmt.Errorf("failed to complete workflow: %w", err)
 	}
-
-	if stats.Completed == stats.Total && stats.Failed == 0 {
-		if err := e.store.UpdateWorkflowStatus(ctx, workflowID, WorkflowStatusSucceeded, ""); err != nil {
-			return fmt.Errorf("failed to mark workflow succeeded: %w", err)
-		}
+	if completed {
 		log.Printf("[taskqueue] workflow succeeded: id=%s", workflowID)
 	}
 	return nil

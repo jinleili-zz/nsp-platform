@@ -129,6 +129,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 		log.Println("[rocketmqbroker] consumer stopped")
 	}
 
+	// Shutdown the push consumer to release resources
+	if c.pushConsumer != nil {
+		if err := c.pushConsumer.Shutdown(); err != nil {
+			log.Printf("[rocketmqbroker] failed to shutdown consumer: %v", err)
+		}
+	}
+
 	return nil
 }
 

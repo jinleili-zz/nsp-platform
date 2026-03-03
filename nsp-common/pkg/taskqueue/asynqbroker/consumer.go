@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"sync"
 
 	"github.com/hibiken/asynq"
 	"github.com/yourorg/nsp-common/pkg/taskqueue"
@@ -25,10 +24,8 @@ type ConsumerConfig struct {
 
 // Consumer implements taskqueue.Consumer using asynq.
 type Consumer struct {
-	server   *asynq.Server
-	mux      *asynq.ServeMux
-	handlers map[string]taskqueue.HandlerFunc
-	mu       sync.RWMutex
+	server *asynq.Server
+	mux    *asynq.ServeMux
 }
 
 // NewConsumer creates an asynq-backed Consumer.
@@ -49,20 +46,14 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 	server := asynq.NewServer(opt, asynqCfg)
 
 	return &Consumer{
-		server:   server,
-		mux:      asynq.NewServeMux(),
-		handlers: make(map[string]taskqueue.HandlerFunc),
+		server: server,
+		mux:    asynq.NewServeMux(),
 	}
 }
 
 // Handle registers a handler for the given task type.
 // The handler receives a decoded TaskPayload (not the raw asynq.Task).
 func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.handlers[taskType] = handler
-
 	c.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
 		var raw struct {
 			TaskID     string `json:"task_id"`
@@ -100,6 +91,11 @@ func (c *Consumer) HandleRaw(taskType string, handler func(context.Context, *asy
 // Start begins consuming messages. This method blocks until Stop is called
 // or the context is cancelled.
 func (c *Consumer) Start(ctx context.Context) error {
+	// Start a goroutine to watch for context cancellation
+	go func() {
+		<-ctx.Done()
+		c.server.Shutdown()
+	}()
 	return c.server.Run(c.mux)
 }
 

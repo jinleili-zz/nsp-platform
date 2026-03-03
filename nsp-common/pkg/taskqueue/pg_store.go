@@ -120,6 +120,25 @@ func (s *PostgresStore) IncrementFailedSteps(ctx context.Context, id string) err
 	return err
 }
 
+// TryCompleteWorkflow atomically marks workflow as succeeded if all steps are completed.
+// Uses conditional UPDATE to avoid TOCTOU race condition.
+func (s *PostgresStore) TryCompleteWorkflow(ctx context.Context, id string) (bool, error) {
+	query := `
+		UPDATE tq_workflows 
+		SET status = 'succeeded', updated_at = $2 
+		WHERE id = $1 
+		  AND status = 'running'
+		  AND completed_steps = total_steps 
+		  AND failed_steps = 0
+	`
+	result, err := s.db.ExecContext(ctx, query, id, time.Now())
+	if err != nil {
+		return false, fmt.Errorf("failed to try complete workflow: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	return rows > 0, nil
+}
+
 // BatchCreateSteps inserts multiple steps in a single transaction.
 func (s *PostgresStore) BatchCreateSteps(ctx context.Context, steps []*StepTask) error {
 	if len(steps) == 0 {
@@ -169,7 +188,7 @@ func (s *PostgresStore) GetStep(ctx context.Context, id string) (*StepTask, erro
 		       retry_count, max_retries, created_at, queued_at, started_at, completed_at, updated_at
 		FROM tq_steps WHERE id = $1
 	`
-	return s.scanStep(s.db.QueryRowContext(ctx, query, id))
+	return s.scanStepFrom(s.db.QueryRowContext(ctx, query, id))
 }
 
 // GetStepsByWorkflow retrieves all steps of a workflow ordered by step_order.
@@ -188,7 +207,7 @@ func (s *PostgresStore) GetStepsByWorkflow(ctx context.Context, workflowID strin
 
 	var steps []*StepTask
 	for rows.Next() {
-		step, err := s.scanStepRow(rows)
+		step, err := s.scanStepFrom(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +225,7 @@ func (s *PostgresStore) GetNextPendingStep(ctx context.Context, workflowID strin
 		FROM tq_steps WHERE workflow_id = $1 AND status = 'pending'
 		ORDER BY step_order ASC LIMIT 1
 	`
-	step, err := s.scanStep(s.db.QueryRowContext(ctx, query, workflowID))
+	step, err := s.scanStepFrom(s.db.QueryRowContext(ctx, query, workflowID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -253,6 +272,13 @@ func (s *PostgresStore) UpdateStepBrokerID(ctx context.Context, id string, broke
 	return err
 }
 
+// IncrementStepRetryCount increments the retry count for a step.
+func (s *PostgresStore) IncrementStepRetryCount(ctx context.Context, id string) error {
+	query := `UPDATE tq_steps SET retry_count = retry_count + 1, updated_at = $2 WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, query, id, time.Now())
+	return err
+}
+
 // GetStepStats returns aggregated step statistics for a workflow.
 func (s *PostgresStore) GetStepStats(ctx context.Context, workflowID string) (*StepStats, error) {
 	query := `
@@ -271,60 +297,20 @@ func (s *PostgresStore) GetStepStats(ctx context.Context, workflowID string) (*S
 	return stats, nil
 }
 
-// scanStep scans a single step from a *sql.Row.
-func (s *PostgresStore) scanStep(row *sql.Row) (*StepTask, error) {
-	step := &StepTask{}
-	var status string
-	var priority int
-	var queueTag, brokerTaskID, result, errorMsg sql.NullString
-	var queuedAt, startedAt, completedAt sql.NullTime
-
-	err := row.Scan(
-		&step.ID, &step.WorkflowID, &step.StepOrder, &step.TaskType, &step.TaskName,
-		&step.Params, &status, &priority,
-		&queueTag, &brokerTaskID, &result, &errorMsg,
-		&step.RetryCount, &step.MaxRetries,
-		&step.CreatedAt, &queuedAt, &startedAt, &completedAt, &step.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	step.Status = StepStatus(status)
-	step.Priority = Priority(priority)
-	if queueTag.Valid {
-		step.QueueTag = queueTag.String
-	}
-	if brokerTaskID.Valid {
-		step.BrokerTaskID = brokerTaskID.String
-	}
-	if result.Valid {
-		step.Result = result.String
-	}
-	if errorMsg.Valid {
-		step.ErrorMessage = errorMsg.String
-	}
-	if queuedAt.Valid {
-		step.QueuedAt = &queuedAt.Time
-	}
-	if startedAt.Valid {
-		step.StartedAt = &startedAt.Time
-	}
-	if completedAt.Valid {
-		step.CompletedAt = &completedAt.Time
-	}
-	return step, nil
+// scanner is an interface that both *sql.Row and *sql.Rows implement.
+type scanner interface {
+	Scan(dest ...interface{}) error
 }
 
-// scanStepRow scans a single step from *sql.Rows.
-func (s *PostgresStore) scanStepRow(rows *sql.Rows) (*StepTask, error) {
+// scanStepFrom scans a single step from any scanner (Row or Rows).
+func (s *PostgresStore) scanStepFrom(sc scanner) (*StepTask, error) {
 	step := &StepTask{}
 	var status string
 	var priority int
 	var queueTag, brokerTaskID, result, errorMsg sql.NullString
 	var queuedAt, startedAt, completedAt sql.NullTime
 
-	err := rows.Scan(
+	err := sc.Scan(
 		&step.ID, &step.WorkflowID, &step.StepOrder, &step.TaskType, &step.TaskName,
 		&step.Params, &status, &priority,
 		&queueTag, &brokerTaskID, &result, &errorMsg,

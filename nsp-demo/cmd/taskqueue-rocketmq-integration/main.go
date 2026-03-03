@@ -17,13 +17,21 @@ import (
 	"github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
 )
 
-const (
-	nameServer = "127.0.0.1:9876"
-	pgDSN      = "postgres://saga:saga123@127.0.0.1:5432/taskqueue_rmq_test?sslmode=disable"
+var (
+	// RocketMQ and PostgreSQL config - read from environment or use defaults for local development
+	nameServer = getEnv("ROCKETMQ_NAMESERVER", "127.0.0.1:9876")
+	pgDSN      = getEnv("PG_DSN", "postgres://saga:saga123@127.0.0.1:5432/taskqueue_rmq_test?sslmode=disable")
 
 	callbackQueue = "rmq_callbacks"
 	taskQueue     = "rmq_tasks"
 )
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)

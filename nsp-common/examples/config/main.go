@@ -127,9 +127,9 @@ func main() {
 
 	// ── Step 2: Register hot-reload callback ────────────────────────────────
 	reloadCount := 0
-	loader.OnChange(func(unmarshal config.UnmarshalFunc) {
+	loader.OnChange(func(apply func(target any) error) {
 		var newCfg AppConfig
-		if err := unmarshal(&newCfg); err != nil {
+		if err := apply(&newCfg); err != nil {
 			fmt.Fprintf(os.Stderr, "[HOT RELOAD] Failed to parse new config: %v\n", err)
 			return
 		}
@@ -139,7 +139,7 @@ func main() {
 	})
 
 	fmt.Println("Watching config file for changes. Modify examples/config/config.yaml to see hot reload.")
-	fmt.Println("Press Ctrl+C to exit.\n")
+	fmt.Println("Press Ctrl+C to exit.")
 
 	// ── Step 3: Trigger an automatic hot-reload demo after 2s ───────────────
 	go func() {

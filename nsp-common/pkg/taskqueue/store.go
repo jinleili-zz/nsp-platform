@@ -15,6 +15,9 @@ type Store interface {
 	UpdateWorkflowStatus(ctx context.Context, id string, status WorkflowStatus, errorMsg string) error
 	IncrementCompletedSteps(ctx context.Context, id string) error
 	IncrementFailedSteps(ctx context.Context, id string) error
+	// TryCompleteWorkflow atomically marks workflow as succeeded if all steps are completed.
+	// Returns true if workflow was marked as succeeded, false if conditions not met.
+	TryCompleteWorkflow(ctx context.Context, id string) (bool, error)
 
 	// --- Step ---
 	BatchCreateSteps(ctx context.Context, steps []*StepTask) error
@@ -25,4 +28,5 @@ type Store interface {
 	UpdateStepResult(ctx context.Context, id string, status StepStatus, result string, errorMsg string) error
 	UpdateStepBrokerID(ctx context.Context, id string, brokerTaskID string) error
 	GetStepStats(ctx context.Context, workflowID string) (*StepStats, error)
+	IncrementStepRetryCount(ctx context.Context, id string) error
 }
