@@ -1,0 +1,26 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Binary output directories
+/bin/
+/dist/
+
+# Demo binaries
+nsp-demo/lock-demo
+
+# Test binary
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
