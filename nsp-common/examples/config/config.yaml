@@ -1,0 +1,18 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  timeout: 30
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "myapp"
+  username: "appuser"
+  password: "secret"
+  max_conns: 10
+
+log:
+  level: "info"
+  format: "json"
+
+debug: false

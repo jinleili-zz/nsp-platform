@@ -6,6 +6,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -53,6 +54,8 @@ func newViperLoader(opt Option) (*viperLoader, error) {
 	// Bind environment variables
 	if opt.EnvPrefix != "" {
 		v.SetEnvPrefix(opt.EnvPrefix)
+		// Replace "." with "_" in key names so that "server.port" maps to "NSP_SERVER_PORT"
+		v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 		v.AutomaticEnv()
 	}
 
@@ -64,15 +67,13 @@ func newViperLoader(opt Option) (*viperLoader, error) {
 
 // Load loads the configuration file and unmarshals it into target.
 // Each call re-reads the file content.
+// Uses UnmarshalExact which returns an error for any unknown fields in the
+// config file, preventing typos from being silently ignored.
 func (l *viperLoader) Load(target any) error {
 	if err := l.v.ReadInConfig(); err != nil {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
-
-	// Use mapstructure with standard settings
-	// Note: Strict validation of unused fields is not directly supported by viper
-	// Business code should validate configuration after loading if needed
-	return l.v.Unmarshal(target)
+	return l.v.UnmarshalExact(target)
 }
 
 // Unmarshal unmarshals the current in-memory configuration into target.
