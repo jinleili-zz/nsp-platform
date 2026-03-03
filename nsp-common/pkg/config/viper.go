@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
@@ -115,6 +116,13 @@ func (l *viperLoader) Close() {
 // Must be called with l.mu held (called from Load).
 func (l *viperLoader) startWatching() {
 	l.v.WatchConfig()
+
+	// Debounce timer to coalesce multiple fsnotify events into one callback invocation.
+	// fsnotify on Linux may fire multiple events for a single file write (e.g., WRITE + CHMOD,
+	// or multiple WRITE events). We debounce with a 50ms window to handle this.
+	var debounceTimer *time.Timer
+	var debounceMu sync.Mutex
+
 	l.v.OnConfigChange(func(e fsnotify.Event) {
 		// Check if loader is closed
 		select {
@@ -123,38 +131,57 @@ func (l *viperLoader) startWatching() {
 		default:
 		}
 
-		// Note: Kubernetes Secret volume updates use atomic symlink replacement,
-		// which triggers fsnotify Create events. viper's internal fsnotify
-		// already handles this scenario correctly, no additional adaptation needed.
-
-		// Acquire write lock to protect callbacks list and viper state
-		l.mu.Lock()
-
-		// applyFn is provided to each callback so that it can deserialize the
-		// latest in-memory configuration. Uses UnmarshalExact to maintain the
-		// same strict behaviour as Load (unknown fields cause an error).
-		applyFn := func(target any) error {
-			return l.v.UnmarshalExact(target)
+		debounceMu.Lock()
+		if debounceTimer != nil {
+			debounceTimer.Stop()
 		}
-
-		// Copy callbacks to avoid holding lock during execution
-		callbacks := make([]func(func(any) error), len(l.callbacks))
-		copy(callbacks, l.callbacks)
-		l.mu.Unlock()
-
-		// Execute callbacks in registration order.
-		// Individual callback panics are recovered to ensure subsequent callbacks execute.
-		for _, cb := range callbacks {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						// Log panic but continue executing remaining callbacks.
-						// Cannot use logger here to avoid dependency cycle.
-						fmt.Printf("config callback panic recovered: %v\n", r)
-					}
-				}()
-				cb(applyFn)
-			}()
-		}
+		debounceTimer = time.AfterFunc(50*time.Millisecond, func() {
+			l.executeCallbacks()
+		})
+		debounceMu.Unlock()
 	})
+}
+
+// executeCallbacks invokes all registered callbacks with the current configuration.
+func (l *viperLoader) executeCallbacks() {
+	// Check if loader is closed
+	select {
+	case <-l.done:
+		return
+	default:
+	}
+
+	// Note: Kubernetes Secret volume updates use atomic symlink replacement,
+	// which triggers fsnotify Create events. viper's internal fsnotify
+	// already handles this scenario correctly, no additional adaptation needed.
+
+	// Acquire write lock to protect callbacks list and viper state
+	l.mu.Lock()
+
+	// applyFn is provided to each callback so that it can deserialize the
+	// latest in-memory configuration. Uses UnmarshalExact to maintain the
+	// same strict behaviour as Load (unknown fields cause an error).
+	applyFn := func(target any) error {
+		return l.v.UnmarshalExact(target)
+	}
+
+	// Copy callbacks to avoid holding lock during execution
+	callbacks := make([]func(func(any) error), len(l.callbacks))
+	copy(callbacks, l.callbacks)
+	l.mu.Unlock()
+
+	// Execute callbacks in registration order.
+	// Individual callback panics are recovered to ensure subsequent callbacks execute.
+	for _, cb := range callbacks {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Log panic but continue executing remaining callbacks.
+					// Cannot use logger here to avoid dependency cycle.
+					fmt.Printf("config callback panic recovered: %v\n", r)
+				}
+			}()
+			cb(applyFn)
+		}()
+	}
 }
