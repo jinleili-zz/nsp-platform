@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 )
 
 func init() {

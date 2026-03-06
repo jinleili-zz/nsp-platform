@@ -1,4 +1,4 @@
-module github.com/yourorg/nsp-demo
+module github.com/paic/nsp-demo
 
 go 1.25.6
 
@@ -7,7 +7,7 @@ require (
 	github.com/go-resty/resty/v2 v2.17.2
 	github.com/hibiken/asynq v0.26.0
 	github.com/lib/pq v1.10.9
-	github.com/yourorg/nsp-common v0.0.0
+	github.com/paic/nsp-common v0.0.0
 )
 
 require (
@@ -68,4 +68,4 @@ require (
 	stathat.com/c/consistent v1.0.0 // indirect
 )
 
-replace github.com/yourorg/nsp-common => ../nsp-common
+replace github.com/paic/nsp-common => ../nsp-common

@@ -7,7 +7,7 @@ import (
 	"log"
 
 	"github.com/hibiken/asynq"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 )
 
 // ConsumerConfig holds configuration for the asynq consumer.

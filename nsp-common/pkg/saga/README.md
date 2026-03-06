@@ -148,7 +148,7 @@ psql -h localhost -U saga -d saga_test -f migrations/saga.sql
 ### 1. 初始化引擎
 
 ```go
-import "github.com/yourorg/nsp-common/pkg/saga"
+import "github.com/paic/nsp-common/pkg/saga"
 
 // 创建引擎
 engine, err := saga.NewEngine(&saga.Config{

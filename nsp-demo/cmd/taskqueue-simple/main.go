@@ -21,8 +21,8 @@ import (
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
-	"github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 const (

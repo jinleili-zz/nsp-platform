@@ -116,10 +116,10 @@ represent two different configurations is also confusing. Consider a separate
 
 ```go
 // nsp-demo/cmd/lock-demo/main.go
-import "github.com/yourorg/nsp-common/pkg/lock"
+import "github.com/paic/nsp-common/pkg/lock"
 ```
 
-`yourorg` is a placeholder. Verify this matches the actual `go.mod` module path before
+`paic` is a placeholder. Verify this matches the actual `go.mod` module path before
 landing.
 
 **9. `RetryDelay` struct field comment omits jitter**
@@ -174,7 +174,7 @@ for the common case.
 | Medium | `watchdog` field unprotected by `muMu` in `Release` — data race |
 | Medium | `log.Printf` in watchdog — inconsistent with project logger |
 | Low | `StandaloneRedisClient` stores `client: nil` — confusing + amplifies leak |
-| Low | Placeholder `yourorg` import path in demo |
+| Low | Placeholder `paic` import path in demo |
 | Low | `RetryDelay` struct comment omits jitter |
 | Low | `TestWithWatchdog` sleeps 2.5 s real time |
 
@@ -254,10 +254,10 @@ for the common case.
 
 ---
 
-### #8 Placeholder `yourorg` import path — 不需要修
+### #8 Placeholder `paic` import path — 不需要修
 
 这是项目级的约定，`go.mod` 中通过 `replace` 指令解决，不是 lock 模块的问题。
-整个项目（nsp-common、nsp-demo）统一使用 `yourorg` 占位符，后续统一替换即可。
+整个项目（nsp-common、nsp-demo）统一使用 `paic` 占位符，后续统一替换即可。
 
 ---
 
@@ -305,7 +305,7 @@ watchdog 有 `max(TTL/3, 1s)` 的最小间隔限制，TTL=1s 时 interval 被 cl
 | 5 | watchdog 字段无锁保护 | **已修复** | `wd` 字段的读写统一放在 `muMu.Lock()` 保护范围内（`Acquire`/`TryAcquire`/`Release` 三处） |
 | 6 | log.Printf 与 logger 不一致 | **已修复** | `newWatchdog` 新增 `logFn func(string, ...any)` 参数；`redisLock.startWatchdog()` 传入 `logger.Warn` 的封装函数 |
 | 7 | Standalone client: nil | **已修复** | 随 #1 一并解决，`NewStandaloneRedisClient` 将 `redis.Client` 存入 `closer` 字段 |
-| 8 | yourorg 占位符 | **不修** | 项目级约定，`go.mod` 通过 `replace` 指令解决，所有模块统一使用 `yourorg` 占位符 |
+| 8 | paic 占位符 | **不修** | 项目级约定，`go.mod` 通过 `replace` 指令解决，所有模块统一使用 `paic` 占位符 |
 | 9 | RetryDelay 注释缺 jitter | **不修** | review 有误——`LockOption.RetryDelay` 的 struct 注释（`lock.go:91-94`）已包含 jitter 说明，与 `WithRetryDelay` godoc 一致 |
 | 10 | 测试 sleep 2.5s | **不修** | watchdog 有 `max(TTL/3, 1s)` 最小间隔限制，当前 TTL=1s + sleep 2.5s 是覆盖多次续约的最短可行配置，缩短空间有限且会引入 flaky 风险 |
 | 11 | newTestClient 弃 mr | **不修** | 纯风格问题，`_ = mr` 表意清晰，不影响功能 |

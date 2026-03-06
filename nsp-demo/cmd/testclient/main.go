@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/yourorg/nsp-common/pkg/auth"
+	"github.com/paic/nsp-common/pkg/auth"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/yourorg/nsp-common
+module github.com/paic/nsp-common
 
 go 1.24.9
 

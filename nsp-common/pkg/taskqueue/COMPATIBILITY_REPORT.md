@@ -151,10 +151,10 @@ engine, _ := taskqueue.NewEngine(cfg, broker)  // 接受 taskqueue.Broker 接口
 #### 原因 3：包级别隔离
 ```go
 // 使用 Asynq 的代码
-import "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+import "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 
 // 使用 RocketMQ 的代码
-import "github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
+import "github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
 
 // 两者完全独立，互不影响
 ```
@@ -164,7 +164,7 @@ import "github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
 #### 场景 1：继续使用 Asynq（无需任何改动）
 ```go
 // 代码完全不变
-import "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+import "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 
 broker := asynqbroker.NewBroker(redisOpt)
 consumer := asynqbroker.NewConsumer(redisOpt, cfg)
@@ -173,8 +173,8 @@ consumer := asynqbroker.NewConsumer(redisOpt, cfg)
 
 #### 场景 2：切换到 RocketMQ（仅修改 3 行）
 ```diff
-- import "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
-+ import "github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
+- import "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
++ import "github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
 
 - broker := asynqbroker.NewBroker(redisOpt)
 + broker, _ := rocketmqbroker.NewBroker(&rocketmqbroker.BrokerConfig{...})

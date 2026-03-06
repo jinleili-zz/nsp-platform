@@ -8,7 +8,7 @@ import (
 	"github.com/apache/rocketmq-client-go/v2"
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 	"github.com/apache/rocketmq-client-go/v2/producer"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 )
 
 // BrokerConfig holds configuration for the RocketMQ broker.

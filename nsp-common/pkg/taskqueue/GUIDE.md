@@ -80,7 +80,7 @@ pending → queued → running → completed
 ```bash
 go get github.com/hibiken/asynq
 go get github.com/lib/pq
-go get github.com/yourorg/nsp-common/pkg/taskqueue
+go get github.com/paic/nsp-common/pkg/taskqueue
 ```
 
 **数据库初始化**
@@ -99,8 +99,8 @@ import (
     "context"
     "log"
     "github.com/hibiken/asynq"
-    "github.com/yourorg/nsp-common/pkg/taskqueue"
-    "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue"
+    "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func main() {
@@ -173,8 +173,8 @@ import (
     "encoding/json"
     "log"
     "github.com/hibiken/asynq"
-    "github.com/yourorg/nsp-common/pkg/taskqueue"
-    "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue"
+    "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func main() {

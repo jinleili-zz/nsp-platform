@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/yourorg/nsp-common/pkg/trace"
+	"github.com/paic/nsp-common/pkg/trace"
 )
 
 // Config holds configuration for the SAGA engine.

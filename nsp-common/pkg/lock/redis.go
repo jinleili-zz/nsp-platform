@@ -38,7 +38,7 @@ import (
 	"github.com/go-redsync/redsync/v4"
 	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 )
 
 // RedisOption holds configuration for the Redis Cluster client.

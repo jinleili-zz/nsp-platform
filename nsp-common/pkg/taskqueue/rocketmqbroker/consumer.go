@@ -11,7 +11,7 @@ import (
 	"github.com/apache/rocketmq-client-go/v2"
 	"github.com/apache/rocketmq-client-go/v2/consumer"
 	"github.com/apache/rocketmq-client-go/v2/primitive"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 )
 
 // ConsumerConfig holds configuration for the RocketMQ consumer.

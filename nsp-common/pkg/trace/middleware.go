@@ -4,7 +4,7 @@ package trace
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/yourorg/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/logger"
 )
 
 // ginTraceKey 用于在 gin.Context 中存储 TraceContext 的 key

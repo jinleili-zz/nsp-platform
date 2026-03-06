@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/yourorg/nsp-common/pkg/auth"
-	"github.com/yourorg/nsp-common/pkg/logger"
-	"github.com/yourorg/nsp-common/pkg/trace"
-	"github.com/yourorg/nsp-demo/internal/handler"
-	"github.com/yourorg/nsp-demo/internal/middleware"
+	"github.com/paic/nsp-common/pkg/auth"
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/trace"
+	"github.com/paic/nsp-demo/internal/handler"
+	"github.com/paic/nsp-demo/internal/middleware"
 )
 
 func main() {

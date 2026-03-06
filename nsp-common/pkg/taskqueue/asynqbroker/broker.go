@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/hibiken/asynq"
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue"
 )
 
 // Broker implements taskqueue.Broker using asynq.

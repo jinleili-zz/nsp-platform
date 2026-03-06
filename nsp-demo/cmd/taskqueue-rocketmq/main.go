@@ -27,8 +27,8 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/yourorg/nsp-common/pkg/taskqueue"
-	"github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
+	"github.com/paic/nsp-common/pkg/taskqueue"
+	"github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
 )
 
 var (

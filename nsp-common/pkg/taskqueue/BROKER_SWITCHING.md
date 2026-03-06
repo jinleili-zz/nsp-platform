@@ -25,12 +25,12 @@ TaskQueue 框架设计为支持多种消息队列，目前支持：
 // 原来 (Asynq)
 import (
     "github.com/hibiken/asynq"
-    "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 // 改为 (RocketMQ)
 import (
-    "github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
 )
 ```
 
@@ -111,8 +111,8 @@ package main
 
 import (
     "github.com/hibiken/asynq"
-    "github.com/yourorg/nsp-common/pkg/taskqueue"
-    "github.com/yourorg/nsp-common/pkg/taskqueue/asynqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue"
+    "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
 func main() {
@@ -149,8 +149,8 @@ func main() {
 package main
 
 import (
-    "github.com/yourorg/nsp-common/pkg/taskqueue"
-    "github.com/yourorg/nsp-common/pkg/taskqueue/rocketmqbroker"
+    "github.com/paic/nsp-common/pkg/taskqueue"
+    "github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
 )
 
 func main() {

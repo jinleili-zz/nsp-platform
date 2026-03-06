@@ -32,7 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yourorg/nsp-common/pkg/lock"
+	"github.com/paic/nsp-common/pkg/lock"
 )
 
 func main() {

@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/nsp-common/pkg/config"
+	"github.com/paic/nsp-common/pkg/config"
 )
 
 // ServerConfig holds server-related configuration.
