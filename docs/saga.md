@@ -1,0 +1,376 @@
+# Saga 模块
+
+> 包路径：`github.com/paic/nsp-common/pkg/saga`
+
+## 功能说明
+
+Saga 模块解决以下问题：
+
+- **分布式事务**：跨服务的长事务拆分为多个本地事务，通过补偿保证最终一致性
+- **同步/异步步骤**：支持同步 HTTP 调用和异步轮询两种步骤类型
+- **自动补偿**：步骤失败时自动按逆序执行已完成步骤的补偿操作
+- **故障恢复**：引擎重启后自动恢复未完成的事务
+- **超时处理**：支持事务级别超时，超时后自动触发补偿
+
+---
+
+## 核心概念
+
+### 事务状态
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: Submit
+    pending --> running: 开始执行
+    running --> succeeded: 所有步骤成功
+    running --> compensating: 步骤失败
+    compensating --> failed: 补偿完成
+    succeeded --> [*]
+    failed --> [*]
+```
+
+| 状态 | 说明 |
+|------|------|
+| `pending` | 事务已创建，等待执行 |
+| `running` | 事务正在执行步骤 |
+| `compensating` | 步骤失败，正在执行补偿 |
+| `succeeded` | 所有步骤执行成功 |
+| `failed` | 补偿完成，事务失败 |
+
+### 步骤状态
+
+| 状态 | 说明 |
+|------|------|
+| `pending` | 步骤未开始 |
+| `running` | 步骤正在执行 |
+| `polling` | 异步步骤等待轮询结果 |
+| `succeeded` | 步骤执行成功 |
+| `failed` | 步骤执行失败 |
+| `compensating` | 步骤正在补偿 |
+| `compensated` | 步骤补偿完成 |
+| `skipped` | 步骤被跳过 |
+
+### 步骤类型
+
+| 类型 | 说明 |
+|------|------|
+| `StepTypeSync` | 同步步骤，HTTP 调用立即返回结果 |
+| `StepTypeAsync` | 异步步骤，HTTP 调用受理后需轮询确认最终状态 |
+
+---
+
+## 核心接口
+
+```go
+// Engine 引擎入口
+type Engine struct { /* ... */ }
+
+func NewEngine(cfg *Config) (*Engine, error)
+func (e *Engine) Start(ctx context.Context) error
+func (e *Engine) Stop() error
+func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error)
+func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, error)
+
+// SagaBuilder 构建器
+func NewSaga(name string) *SagaBuilder
+func (b *SagaBuilder) AddStep(step Step) *SagaBuilder
+func (b *SagaBuilder) WithTimeout(seconds int) *SagaBuilder
+func (b *SagaBuilder) WithPayload(payload map[string]any) *SagaBuilder
+func (b *SagaBuilder) Build() (*SagaDefinition, error)
+```
+
+---
+
+## 配置项
+
+### Config
+
+| 字段名 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `DSN` | `string` | **必填** | PostgreSQL 连接串 |
+| `WorkerCount` | `int` | `4` | 协调器并发 Worker 数 |
+| `PollBatchSize` | `int` | `20` | 轮询器每次扫描任务数 |
+| `PollScanInterval` | `time.Duration` | `3s` | 轮询器扫描间隔 |
+| `CoordScanInterval` | `time.Duration` | `5s` | 协调器扫描间隔 |
+| `HTTPTimeout` | `time.Duration` | `30s` | HTTP 调用超时 |
+| `InstanceID` | `string` | 自动生成 | 实例唯一标识 |
+
+### Step 配置
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| `Name` | `string` | 步骤名称（日志用） |
+| `Type` | `StepType` | `sync` 或 `async` |
+| `ActionMethod` | `string` | 正向操作 HTTP 方法 |
+| `ActionURL` | `string` | 正向操作 URL（支持模板） |
+| `ActionPayload` | `map[string]any` | 正向操作请求体（支持模板） |
+| `CompensateMethod` | `string` | 补偿操作 HTTP 方法 |
+| `CompensateURL` | `string` | 补偿操作 URL（支持模板） |
+| `CompensatePayload` | `map[string]any` | 补偿操作请求体（支持模板） |
+| `MaxRetry` | `int` | 最大重试次数（默认 3） |
+
+### 异步步骤额外配置
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| `PollURL` | `string` | 轮询 URL（支持模板） |
+| `PollMethod` | `string` | 轮询 HTTP 方法（默认 GET） |
+| `PollIntervalSec` | `int` | 轮询间隔秒数（默认 5） |
+| `PollMaxTimes` | `int` | 最大轮询次数（默认 60） |
+| `PollSuccessPath` | `string` | 成功判断的 JSONPath |
+| `PollSuccessValue` | `string` | 成功判断的期望值 |
+| `PollFailurePath` | `string` | 失败判断的 JSONPath |
+| `PollFailureValue` | `string` | 失败判断的期望值 |
+
+---
+
+## 快速使用
+
+### 引擎初始化
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    _ "github.com/lib/pq"
+    "github.com/paic/nsp-common/pkg/saga"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // 创建引擎
+    engine, err := saga.NewEngine(&saga.Config{
+        DSN:         "postgres://user:pass@localhost:5432/nsp?sslmode=disable",
+        WorkerCount: 4,
+        HTTPTimeout: 30 * time.Second,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // 启动后台任务（协调器 + 轮询器）
+    if err := engine.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+    defer engine.Stop()
+
+    // 业务代码...
+    select {}
+}
+```
+
+### 同步步骤事务
+
+```go
+func createOrderTransaction(engine *saga.Engine, ctx context.Context) (string, error) {
+    def, err := saga.NewSaga("order-checkout").
+        AddStep(saga.Step{
+            Name:             "扣减库存",
+            Type:             saga.StepTypeSync,
+            ActionMethod:     "POST",
+            ActionURL:        "http://stock-service/api/v1/stock/deduct",
+            ActionPayload:    map[string]any{"sku_id": "SKU-001", "count": 2},
+            CompensateMethod: "POST",
+            CompensateURL:    "http://stock-service/api/v1/stock/rollback",
+            CompensatePayload: map[string]any{"sku_id": "SKU-001", "count": 2},
+        }).
+        AddStep(saga.Step{
+            Name:             "创建订单",
+            Type:             saga.StepTypeSync,
+            ActionMethod:     "POST",
+            ActionURL:        "http://order-service/api/v1/orders",
+            ActionPayload:    map[string]any{"user_id": "U-001", "sku_id": "SKU-001"},
+            CompensateMethod: "DELETE",
+            // 使用模板变量：引用上一步的响应
+            CompensateURL:    "http://order-service/api/v1/orders/{action_response.order_id}",
+        }).
+        AddStep(saga.Step{
+            Name:             "扣款",
+            Type:             saga.StepTypeSync,
+            ActionMethod:     "POST",
+            ActionURL:        "http://payment-service/api/v1/pay",
+            ActionPayload:    map[string]any{
+                "user_id":  "U-001",
+                "order_id": "{step[1].action_response.order_id}",
+                "amount":   199.99,
+            },
+            CompensateMethod: "POST",
+            CompensateURL:    "http://payment-service/api/v1/refund",
+            CompensatePayload: map[string]any{
+                "order_id": "{step[1].action_response.order_id}",
+            },
+        }).
+        WithTimeout(300).  // 5 分钟超时
+        Build()
+
+    if err != nil {
+        return "", err
+    }
+
+    return engine.Submit(ctx, def)
+}
+```
+
+### 异步步骤事务
+
+```go
+func deviceConfigTransaction(engine *saga.Engine, ctx context.Context) (string, error) {
+    def, err := saga.NewSaga("device-config").
+        AddStep(saga.Step{
+            Name:             "下发配置",
+            Type:             saga.StepTypeAsync,  // 异步步骤
+            ActionMethod:     "POST",
+            ActionURL:        "http://device-service/api/v1/config/apply",
+            ActionPayload:    map[string]any{"device_id": "DEV-001", "config": "..."},
+            CompensateMethod: "POST",
+            CompensateURL:    "http://device-service/api/v1/config/rollback",
+            CompensatePayload: map[string]any{"device_id": "DEV-001"},
+            // 轮询配置
+            PollURL:          "http://device-service/api/v1/config/status?task_id={action_response.task_id}",
+            PollMethod:       "GET",
+            PollIntervalSec:  10,   // 每 10 秒轮询一次
+            PollMaxTimes:     30,   // 最多轮询 30 次（5 分钟）
+            PollSuccessPath:  "$.status",
+            PollSuccessValue: "success",
+            PollFailurePath:  "$.status",
+            PollFailureValue: "failed",
+        }).
+        Build()
+
+    if err != nil {
+        return "", err
+    }
+
+    return engine.Submit(ctx, def)
+}
+```
+
+### 查询事务状态
+
+```go
+func queryTransaction(engine *saga.Engine, ctx context.Context, txID string) {
+    status, err := engine.Query(ctx, txID)
+    if err != nil {
+        log.Printf("查询失败: %v", err)
+        return
+    }
+    if status == nil {
+        log.Printf("事务不存在: %s", txID)
+        return
+    }
+
+    log.Printf("事务状态: %s", status.Status)
+    log.Printf("当前步骤: %d", status.CurrentStep)
+
+    for _, step := range status.Steps {
+        log.Printf("  步骤 %d [%s]: %s", step.Index, step.Name, step.Status)
+        if step.LastError != "" {
+            log.Printf("    错误: %s", step.LastError)
+        }
+    }
+}
+```
+
+---
+
+## 模板变量语法
+
+| 语法 | 说明 | 示例 |
+|------|------|------|
+| `{action_response.field}` | 当前步骤的响应字段 | `{action_response.order_id}` |
+| `{step[N].action_response.field}` | 指定步骤的响应字段 | `{step[0].action_response.task_id}` |
+| `{transaction.payload.field}` | 全局 Payload 字段 | `{transaction.payload.user_id}` |
+
+---
+
+## 数据库表结构
+
+```sql
+-- 事务表
+CREATE TABLE saga_transactions (
+    id              VARCHAR(64)  PRIMARY KEY,
+    status          VARCHAR(20)  NOT NULL,
+    payload         JSONB,
+    current_step    INT          NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    finished_at     TIMESTAMPTZ,
+    timeout_at      TIMESTAMPTZ,
+    retry_count     INT          NOT NULL DEFAULT 0,
+    last_error      TEXT
+);
+
+-- 步骤表
+CREATE TABLE saga_steps (
+    id                  VARCHAR(64)  PRIMARY KEY,
+    transaction_id      VARCHAR(64)  NOT NULL REFERENCES saga_transactions(id),
+    step_index          INT          NOT NULL,
+    name                VARCHAR(128) NOT NULL,
+    step_type           VARCHAR(20)  NOT NULL,
+    status              VARCHAR(20)  NOT NULL,
+    action_method       VARCHAR(10)  NOT NULL,
+    action_url          TEXT         NOT NULL,
+    action_payload      JSONB,
+    action_response     JSONB,
+    compensate_method   VARCHAR(10)  NOT NULL,
+    compensate_url      TEXT         NOT NULL,
+    compensate_payload  JSONB,
+    poll_url            TEXT,
+    poll_interval_sec   INT          DEFAULT 5,
+    poll_max_times      INT          DEFAULT 60,
+    poll_count          INT          NOT NULL DEFAULT 0,
+    poll_success_path   TEXT,
+    poll_success_value  TEXT,
+    poll_failure_path   TEXT,
+    poll_failure_value  TEXT,
+    retry_count         INT          NOT NULL DEFAULT 0,
+    max_retry           INT          NOT NULL DEFAULT 3,
+    last_error          TEXT,
+    UNIQUE (transaction_id, step_index)
+);
+
+-- 轮询任务表
+CREATE TABLE saga_poll_tasks (
+    id              BIGSERIAL    PRIMARY KEY,
+    step_id         VARCHAR(64)  NOT NULL REFERENCES saga_steps(id),
+    transaction_id  VARCHAR(64)  NOT NULL,
+    next_poll_at    TIMESTAMPTZ  NOT NULL,
+    locked_until    TIMESTAMPTZ,
+    locked_by       VARCHAR(64),
+    UNIQUE (step_id)
+);
+```
+
+---
+
+## 注意事项
+
+### 补偿设计原则
+
+- **幂等性**：补偿操作必须幂等，可能被多次调用
+- **可重入**：补偿失败后会重试，设计时考虑部分补偿的情况
+- **最终一致**：补偿完成后系统达到一致状态
+
+### 性能提示
+
+- 步骤数量建议控制在 10 个以内
+- 异步步骤轮询间隔不宜过短（建议 >= 5s）
+- 事务超时时间根据业务实际耗时设置
+
+---
+
+## 错误类型
+
+```go
+var (
+    ErrNoSteps                    = errors.New("saga must have at least one step")
+    ErrAsyncStepMissingPollConfig = errors.New("async step must have PollURL, PollSuccessPath, and PollSuccessValue")
+    ErrStepMissingAction          = errors.New("step must have ActionMethod and ActionURL")
+    ErrStepMissingCompensate      = errors.New("step must have CompensateMethod and CompensateURL")
+)
+```
