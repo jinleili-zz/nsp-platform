@@ -22,7 +22,8 @@ func NewBroker(opt asynq.RedisConnOpt) *Broker {
 
 // Publish sends a task to the asynq queue.
 func (b *Broker) Publish(ctx context.Context, task *taskqueue.Task) (*taskqueue.TaskInfo, error) {
-	asynqTask := asynq.NewTask(task.Type, task.Payload)
+	wrappedPayload := wrapWithTrace(ctx, task.Payload)
+	asynqTask := asynq.NewTask(task.Type, wrappedPayload)
 
 	opts := make([]asynq.Option, 0, 2)
 	if task.Queue != "" {

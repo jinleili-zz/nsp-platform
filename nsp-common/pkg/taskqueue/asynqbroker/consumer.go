@@ -55,12 +55,15 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 // The handler receives a decoded TaskPayload (not the raw asynq.Task).
 func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
 	c.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
+		rawBytes, metadata := UnwrapEnvelope(t.Payload())
+		ctx = injectTraceFromMetadata(ctx, metadata)
+
 		var raw struct {
 			TaskID     string `json:"task_id"`
 			ResourceID string `json:"resource_id"`
 			TaskParams string `json:"task_params"`
 		}
-		if err := json.Unmarshal(t.Payload(), &raw); err != nil {
+		if err := json.Unmarshal(rawBytes, &raw); err != nil {
 			return fmt.Errorf("failed to unmarshal task payload: %w", err)
 		}
 
@@ -85,7 +88,11 @@ func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
 // HandleRaw registers a raw asynq handler. This is useful for special task types
 // like "task_callback" where the payload format differs.
 func (c *Consumer) HandleRaw(taskType string, handler func(context.Context, *asynq.Task) error) {
-	c.mux.HandleFunc(taskType, handler)
+	c.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
+		rawBytes, metadata := UnwrapEnvelope(t.Payload())
+		ctx = injectTraceFromMetadata(ctx, metadata)
+		return handler(ctx, asynq.NewTask(t.Type(), rawBytes))
+	})
 }
 
 // Start begins consuming messages. This method blocks until Stop is called

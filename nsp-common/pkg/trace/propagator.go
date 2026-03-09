@@ -3,6 +3,7 @@
 package trace
 
 import (
+	"context"
 	"encoding/hex"
 	"net/http"
 )
@@ -136,6 +137,45 @@ func InjectResponse(w http.ResponseWriter, tc *TraceContext) {
 		w.Header().Set(HeaderTraceID, tc.TraceID)
 		// 同时写入 X-Request-Id，兼容只认 X-Request-Id 的客户端和网关
 		w.Header().Set(HeaderRequestID, tc.TraceID)
+	}
+}
+
+// MetadataFromContext extracts trace information from ctx as a string map,
+// suitable for cross-message-queue propagation.
+// Returns nil if ctx has no TraceContext.
+func MetadataFromContext(ctx context.Context) map[string]string {
+	tc, ok := TraceFromContext(ctx)
+	if !ok || tc == nil {
+		return nil
+	}
+	m := map[string]string{
+		"trace_id": tc.TraceID,
+		"span_id":  tc.SpanId,
+		"sampled":  "1",
+	}
+	if !tc.Sampled {
+		m["sampled"] = "0"
+	}
+	return m
+}
+
+// TraceFromMetadata restores a TraceContext from a metadata map.
+// instanceId should be obtained via GetInstanceId().
+// Returns nil if metadata is empty or has no trace_id.
+func TraceFromMetadata(metadata map[string]string, instanceId string) *TraceContext {
+	if len(metadata) == 0 {
+		return nil
+	}
+	traceID := metadata["trace_id"]
+	if traceID == "" {
+		return nil
+	}
+	return &TraceContext{
+		TraceID:      traceID,
+		ParentSpanId: metadata["span_id"],
+		SpanId:       NewSpanId(),
+		InstanceId:   instanceId,
+		Sampled:      metadata["sampled"] != "0",
 	}
 }
 
