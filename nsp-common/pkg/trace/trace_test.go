@@ -762,3 +762,184 @@ func TestExtractInvalidHexSpanID(t *testing.T) {
 		t.Error("Invalid SpanId should result in empty ParentSpanId")
 	}
 }
+
+// TestMetadataFromContext_NoTrace 测试无 TraceContext 时返回 nil
+func TestMetadataFromContext_NoTrace(t *testing.T) {
+	ctx := context.Background()
+	m := MetadataFromContext(ctx)
+	if m != nil {
+		t.Errorf("Expected nil when no trace in context, got %v", m)
+	}
+}
+
+// TestMetadataFromContext_WithTrace 测试从 context 正确提取 metadata
+func TestMetadataFromContext_WithTrace(t *testing.T) {
+	tc := &TraceContext{
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		SpanId:  "00f067aa0ba902b7",
+		Sampled: true,
+	}
+	ctx := ContextWithTrace(context.Background(), tc)
+
+	m := MetadataFromContext(ctx)
+	if m == nil {
+		t.Fatal("Expected non-nil metadata")
+	}
+	if m["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("Expected trace_id '4bf92f3577b34da6a3ce929d0e0e4736', got %s", m["trace_id"])
+	}
+	if m["span_id"] != "00f067aa0ba902b7" {
+		t.Errorf("Expected span_id '00f067aa0ba902b7', got %s", m["span_id"])
+	}
+	if m["sampled"] != "1" {
+		t.Errorf("Expected sampled '1', got %s", m["sampled"])
+	}
+}
+
+// TestMetadataFromContext_NotSampled 测试 Sampled=false 时返回 "0"
+func TestMetadataFromContext_NotSampled(t *testing.T) {
+	tc := &TraceContext{
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		SpanId:  "00f067aa0ba902b7",
+		Sampled: false,
+	}
+	ctx := ContextWithTrace(context.Background(), tc)
+
+	m := MetadataFromContext(ctx)
+	if m["sampled"] != "0" {
+		t.Errorf("Expected sampled '0' when not sampled, got %s", m["sampled"])
+	}
+}
+
+// TestMetadataFromTraceContext_Nil 测试 nil TraceContext 返回 nil
+func TestMetadataFromTraceContext_Nil(t *testing.T) {
+	m := MetadataFromTraceContext(nil)
+	if m != nil {
+		t.Errorf("Expected nil for nil TraceContext, got %v", m)
+	}
+}
+
+// TestMetadataFromTraceContext_Valid 测试有效的 TraceContext 转换
+func TestMetadataFromTraceContext_Valid(t *testing.T) {
+	tc := &TraceContext{
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		SpanId:  "00f067aa0ba902b7",
+		Sampled: true,
+	}
+	m := MetadataFromTraceContext(tc)
+	if m["trace_id"] != tc.TraceID {
+		t.Errorf("trace_id mismatch: expected %s, got %s", tc.TraceID, m["trace_id"])
+	}
+	if m["span_id"] != tc.SpanId {
+		t.Errorf("span_id mismatch: expected %s, got %s", tc.SpanId, m["span_id"])
+	}
+}
+
+// TestTraceFromMetadata_EmptyMetadata 测试空 metadata 返回 nil
+func TestTraceFromMetadata_EmptyMetadata(t *testing.T) {
+	tc := TraceFromMetadata(map[string]string{}, "test-instance")
+	if tc != nil {
+		t.Errorf("Expected nil for empty metadata, got %v", tc)
+	}
+}
+
+// TestTraceFromMetadata_NoTraceID 测试无 trace_id 返回 nil
+func TestTraceFromMetadata_NoTraceID(t *testing.T) {
+	m := map[string]string{"span_id": "00f067aa0ba902b7"}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc != nil {
+		t.Errorf("Expected nil when no trace_id, got %v", tc)
+	}
+}
+
+// TestTraceFromMetadata_InvalidTraceID 测试无效 trace_id 格式返回 nil
+func TestTraceFromMetadata_InvalidTraceID(t *testing.T) {
+	m := map[string]string{
+		"trace_id": "invalid-trace-id",
+		"span_id":  "00f067aa0ba902b7",
+	}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc != nil {
+		t.Errorf("Expected nil for invalid trace_id, got %v", tc)
+	}
+}
+
+// TestTraceFromMetadata_InvalidSpanID 测试无效 span_id 被忽略
+func TestTraceFromMetadata_InvalidSpanID(t *testing.T) {
+	m := map[string]string{
+		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"span_id":  "invalid-span",
+	}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc == nil {
+		t.Fatal("Expected non-nil TraceContext")
+	}
+	if tc.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("TraceID mismatch")
+	}
+	// Invalid span_id should result in empty ParentSpanId
+	if tc.ParentSpanId != "" {
+		t.Errorf("Expected empty ParentSpanId for invalid span_id, got %s", tc.ParentSpanId)
+	}
+}
+
+// TestTraceFromMetadata_Valid 测试有效的 metadata 恢复
+func TestTraceFromMetadata_Valid(t *testing.T) {
+	m := map[string]string{
+		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"span_id":  "00f067aa0ba902b7",
+		"sampled":  "1",
+	}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc == nil {
+		t.Fatal("Expected non-nil TraceContext")
+	}
+	if tc.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("TraceID mismatch")
+	}
+	if tc.ParentSpanId != "00f067aa0ba902b7" {
+		t.Errorf("ParentSpanId mismatch")
+	}
+	if tc.InstanceId != "test-instance" {
+		t.Errorf("InstanceId mismatch")
+	}
+	if !tc.Sampled {
+		t.Error("Sampled should be true")
+	}
+	// SpanId should be newly generated
+	if tc.SpanId == "" {
+		t.Error("SpanId should be generated")
+	}
+	if tc.SpanId == "00f067aa0ba902b7" {
+		t.Error("SpanId should be newly generated, not copied from parent")
+	}
+}
+
+// TestTraceFromMetadata_NotSampled 测试 sampled="0"
+func TestTraceFromMetadata_NotSampled(t *testing.T) {
+	m := map[string]string{
+		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"sampled":  "0",
+	}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc == nil {
+		t.Fatal("Expected non-nil TraceContext")
+	}
+	if tc.Sampled {
+		t.Error("Sampled should be false when '0'")
+	}
+}
+
+// TestTraceFromMetadata_DefaultSampled 测试 sampled 字段缺失时默认为 true
+func TestTraceFromMetadata_DefaultSampled(t *testing.T) {
+	m := map[string]string{
+		"trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+	}
+	tc := TraceFromMetadata(m, "test-instance")
+	if tc == nil {
+		t.Fatal("Expected non-nil TraceContext")
+	}
+	if !tc.Sampled {
+		t.Error("Sampled should default to true when missing")
+	}
+}

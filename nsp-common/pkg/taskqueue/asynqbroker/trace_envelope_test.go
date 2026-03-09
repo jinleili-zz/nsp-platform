@@ -87,7 +87,7 @@ func TestUnwrapEnvelope_ValidEnvelope(t *testing.T) {
 		Payload: original,
 	})
 
-	payload, metadata := UnwrapEnvelope(envelope)
+	payload, metadata := unwrapEnvelope(envelope)
 
 	if string(payload) != string(original) {
 		t.Errorf("expected original payload, got %s", payload)
@@ -110,13 +110,13 @@ func TestUnwrapEnvelope_SampledFalse(t *testing.T) {
 	original := []byte(`{"task_id":"t1"}`)
 	envelope, _ := json.Marshal(taskEnvelope{
 		Version: 1,
-		TraceID: "aaa",
-		SpanID:  "bbb",
+		TraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		SpanID:  "00f067aa0ba902b7",
 		Sampled: false,
 		Payload: original,
 	})
 
-	_, metadata := UnwrapEnvelope(envelope)
+	_, metadata := unwrapEnvelope(envelope)
 
 	if metadata["sampled"] != "0" {
 		t.Errorf("expected sampled=0, got %s", metadata["sampled"])
@@ -127,7 +127,7 @@ func TestUnwrapEnvelope_LegacyPayload(t *testing.T) {
 	// Legacy payload without envelope wrapping.
 	legacy := []byte(`{"task_id":"t1","resource_id":"r1","task_params":"{}"}`)
 
-	payload, metadata := UnwrapEnvelope(legacy)
+	payload, metadata := unwrapEnvelope(legacy)
 
 	if string(payload) != string(legacy) {
 		t.Errorf("expected legacy payload returned as-is, got %s", payload)
@@ -140,7 +140,7 @@ func TestUnwrapEnvelope_LegacyPayload(t *testing.T) {
 func TestUnwrapEnvelope_InvalidJSON(t *testing.T) {
 	garbage := []byte(`not json at all`)
 
-	payload, metadata := UnwrapEnvelope(garbage)
+	payload, metadata := unwrapEnvelope(garbage)
 
 	if string(payload) != string(garbage) {
 		t.Errorf("expected garbage returned as-is, got %s", payload)
@@ -156,7 +156,7 @@ func TestUnwrapEnvelope_WrongVersion(t *testing.T) {
 		"payload": "some data",
 	})
 
-	payload, metadata := UnwrapEnvelope(data)
+	payload, metadata := unwrapEnvelope(data)
 
 	if string(payload) != string(data) {
 		t.Errorf("expected original data returned for wrong version, got %s", payload)
@@ -178,7 +178,7 @@ func TestRoundTrip_WrapAndUnwrap(t *testing.T) {
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
 	wrapped := wrapWithTrace(ctx, original)
-	payload, metadata := UnwrapEnvelope(wrapped)
+	payload, metadata := unwrapEnvelope(wrapped)
 
 	if string(payload) != string(original) {
 		t.Errorf("round-trip payload mismatch: got %s", payload)

@@ -148,6 +148,16 @@ func MetadataFromContext(ctx context.Context) map[string]string {
 	if !ok || tc == nil {
 		return nil
 	}
+	return MetadataFromTraceContext(tc)
+}
+
+// MetadataFromTraceContext converts a TraceContext to a metadata map.
+// This is a helper to avoid duplicate map construction across packages.
+// Returns nil if tc is nil.
+func MetadataFromTraceContext(tc *TraceContext) map[string]string {
+	if tc == nil {
+		return nil
+	}
 	m := map[string]string{
 		"trace_id": tc.TraceID,
 		"span_id":  tc.SpanId,
@@ -161,21 +171,30 @@ func MetadataFromContext(ctx context.Context) map[string]string {
 
 // TraceFromMetadata restores a TraceContext from a metadata map.
 // instanceId should be obtained via GetInstanceId().
-// Returns nil if metadata is empty or has no trace_id.
+// Returns nil if metadata is empty or has no valid trace_id.
+// Performs validation on trace_id (must be 32-char hex) and span_id (must be 16-char hex if present).
 func TraceFromMetadata(metadata map[string]string, instanceId string) *TraceContext {
 	if len(metadata) == 0 {
 		return nil
 	}
 	traceID := metadata["trace_id"]
-	if traceID == "" {
+	// Validate trace_id format: must be 32-character hex string
+	if !isValidHexString(traceID, 32) {
 		return nil
 	}
+
+	parentSpanId := metadata["span_id"]
+	// Validate span_id format if present: must be 16-character hex string
+	if parentSpanId != "" && !isValidHexString(parentSpanId, 16) {
+		parentSpanId = "" // Invalid format, treat as no parent
+	}
+
 	return &TraceContext{
 		TraceID:      traceID,
-		ParentSpanId: metadata["span_id"],
+		ParentSpanId: parentSpanId,
 		SpanId:       NewSpanId(),
 		InstanceId:   instanceId,
-		Sampled:      metadata["sampled"] != "0",
+		Sampled:      metadata["sampled"] != "0", // defaults to true if missing or not "0"
 	}
 }
 

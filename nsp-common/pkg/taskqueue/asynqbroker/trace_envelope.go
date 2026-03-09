@@ -45,45 +45,34 @@ func wrapWithTrace(ctx context.Context, payload []byte) []byte {
 	return data
 }
 
-// UnwrapEnvelope splits an asynq payload into the original business payload
+// unwrapEnvelope splits an asynq payload into the original business payload
 // and trace metadata. If the data is not in envelope format (legacy messages),
 // it returns (data, nil) for backward compatibility.
-func UnwrapEnvelope(data []byte) (payload []byte, metadata map[string]string) {
+func unwrapEnvelope(data []byte) (payload []byte, metadata map[string]string) {
 	var env taskEnvelope
 	if err := json.Unmarshal(data, &env); err != nil || env.Version != 1 {
 		return data, nil
 	}
 
-	metadata = map[string]string{
-		"trace_id": env.TraceID,
-		"span_id":  env.SpanID,
-		"sampled":  "1",
+	// Use trace.MetadataFromTraceContext to avoid duplicate map construction
+	// and ensure consistent format with MetadataFromContext in propagator.go
+	tc := &trace.TraceContext{
+		TraceID: env.TraceID,
+		SpanId:  env.SpanID,
+		Sampled: env.Sampled,
 	}
-	if !env.Sampled {
-		metadata["sampled"] = "0"
-	}
-	return env.Payload, metadata
+	return env.Payload, trace.MetadataFromTraceContext(tc)
 }
 
 // injectTraceFromMetadata restores a TraceContext from metadata and injects it
 // into ctx. Both trace and logger context keys are set so that
 // logger.InfoContext(ctx, ...) automatically includes trace_id and span_id.
-// If metadata is empty or has no trace_id, the original ctx is returned.
+// If metadata is empty or has no valid trace_id, the original ctx is returned.
 func injectTraceFromMetadata(ctx context.Context, metadata map[string]string) context.Context {
-	if len(metadata) == 0 {
+	// Delegate to TraceFromMetadata for trace context construction (avoids code duplication)
+	tc := trace.TraceFromMetadata(metadata, trace.GetInstanceId())
+	if tc == nil {
 		return ctx
-	}
-	traceID := metadata["trace_id"]
-	if traceID == "" {
-		return ctx
-	}
-
-	tc := &trace.TraceContext{
-		TraceID:      traceID,
-		ParentSpanId: metadata["span_id"],
-		SpanId:       trace.NewSpanId(),
-		InstanceId:   trace.GetInstanceId(),
-		Sampled:      metadata["sampled"] != "0",
 	}
 
 	ctx = trace.ContextWithTrace(ctx, tc)
