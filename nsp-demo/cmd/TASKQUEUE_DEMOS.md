@@ -1,24 +1,35 @@
 # TaskQueue Demo 使用说明
 
-本目录包含 TaskQueue 模块的三个演示程序。
+本目录包含 TaskQueue 模块的演示程序，分为两种模式：
 
 ## 目录结构
 
 ```
 nsp-demo/cmd/
-├── taskqueue-simple/       # 入门级示例（推荐新手）
-├── taskqueue-demo/         # 完整功能演示
-└── taskqueue-demo-fail/    # 失败重试演示
+├── taskqueue-workflow-demo/   # 使用 Engine 工作流编排（推荐）
+├── taskqueue-broker-demo/     # 仅使用 Broker（自定义实现）
+└── ... (legacy demos)
 ```
 
-## 1. taskqueue-simple - 入门示例
+## 两种模式对比
 
-**适合人群**：初次使用 TaskQueue
+| 特性 | Workflow Demo | Broker Demo |
+|------|---------------|-------------|
+| 工作流编排 | Engine 自动管理 | 自定义实现 |
+| 步骤状态 | Engine 自动推进 | 需自行管理 |
+| 任务存储 | Engine 负责 | 自定义 TaskStore |
+| 失败重试 | Engine 自动处理 | 需自行实现 |
+| 适用场景 | 复杂多步骤流程 | 简单独立任务 |
+
+---
+
+## 1. taskqueue-workflow-demo - Engine 工作流模式
 
 **特点**：
-- 单机 Redis（无需集群）
-- 简单两步工作流（创建记录 → 发送邮件）
-- 代码简洁，易于理解
+- 使用 Engine 的完整工作流编排能力
+- 自动管理多步骤顺序执行
+- 自动处理失败重试和状态推进
+- PostgreSQL 持久化 + asynq 消息投递
 
 **运行前准备**：
 ```bash
@@ -31,12 +42,12 @@ docker run -d --name postgres \
   -p 5432:5432 postgres:13
 
 # 创建数据库
-psql -h localhost -U postgres -c "CREATE DATABASE taskqueue_simple;"
+psql -h localhost -U postgres -c "CREATE DATABASE taskqueue_workflow;"
 ```
 
 **运行**：
 ```bash
-cd nsp-demo/cmd/taskqueue-simple
+cd nsp-demo/cmd/taskqueue-workflow-demo
 go run main.go
 ```
 
@@ -52,89 +63,75 @@ go run main.go
 
 ---
 
-## 2. taskqueue-demo - 完整功能演示
-
-**适合人群**：了解基本概念，需要学习高级功能
+## 2. taskqueue-broker-demo - 自定义 Broker 模式
 
 **特点**：
-- Redis Cluster 集群模式
-- 自定义队列路由器
-- 多队列（switch / firewall）
-- 完整的 VPC 创建工作流
+- 不使用 Engine 的工作流编排
+- 自定义任务存储层（TaskStore）
+- 自己实现任务提交、状态管理、回调处理
+- 只用 asynq broker 做消息投递
+- 展示如何基于 broker 构建自己的任务队列系统
+
+**与 Workflow Demo 的区别**：
+- Workflow Demo：适合复杂的多步骤业务流程
+- Broker Demo：适合简单的独立任务，或者需要完全自定义任务生命周期的场景
 
 **运行前准备**：
 ```bash
-# 启动 Redis Cluster（3节点）
-# 方法1：使用 docker-compose（推荐）
-# 参考：https://github.com/bitnami/containers/tree/main/bitnami/redis-cluster
-
-# 方法2：手动启动（端口映射到 7001-7003）
-docker run -d --name redis-node-1 -p 7001:6379 redis:6-alpine redis-server --cluster-enabled yes
-docker run -d --name redis-node-2 -p 7002:6379 redis:6-alpine redis-server --cluster-enabled yes
-docker run -d --name redis-node-3 -p 7003:6379 redis:6-alpine redis-server --cluster-enabled yes
-
-# 创建集群
-redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 --cluster-replicas 0
+# 同上，启动 Redis 和 PostgreSQL
+docker run -d --name redis -p 6379:6379 redis:6-alpine
+docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:13
 
 # 创建数据库
-psql -h localhost -U saga -c "CREATE DATABASE taskqueue_test;"
-# 注意：需要修改 main.go 中的 DSN 连接字符串
+psql -h localhost -U postgres -c "CREATE DATABASE taskqueue_broker;"
 ```
 
 **运行**：
 ```bash
-cd nsp-demo/cmd/taskqueue-demo
+cd nsp-demo/cmd/taskqueue-broker-demo
 go run main.go
 ```
 
 **预期输出**：
 ```
-[Demo] Workflow submitted: id=xxx
-[Worker] Creating VRF: VRF-DEMO-1
-[Worker] Creating VLAN subinterface: vlan_id=100
-[Worker] Creating firewall zone: zone-demo-1
-[Demo] ✅ Workflow SUCCEEDED!
+[Setup] Broker created
+[Setup] Database migrated
+[Demo] Task 1 submitted: id=xxx
+[Demo] Task 2 submitted: id=xxx
+[Worker] Creating record: user_registration
+[Worker] Sending email to: user@example.com
+[Demo] ✅ All Tasks SUCCEEDED!
+[Demo] Testing retry logic
+[Demo] Failing task final status: failed (retries=2/2)
 ```
 
----
+**代码结构解析**：
 
-## 3. taskqueue-demo-fail - 失败重试演示
+```go
+// 1. 自定义任务存储层
+type TaskStore struct {
+    db *sql.DB
+}
 
-**适合人群**：需要了解错误处理和重试机制
+// 2. 任务管理器（核心逻辑）
+type TaskManager struct {
+    store  *TaskStore
+    broker *asynqbroker.Broker
+}
 
-**特点**：
-- 模拟步骤失败场景
-- 演示 `RetryStep()` 手动重试
-- 验证工作流状态流转
+// 3. 提交任务：存储到 DB + 发布到 Broker
+func (m *TaskManager) SubmitTask(ctx context.Context, ...) (string, error) {
+    // 1. 写入 PostgreSQL
+    // 2. 发布到 asynq
+    // 3. 更新状态
+}
 
-**流程**：
-1. Step 1 成功
-2. Step 2 首次执行失败
-3. Workflow 进入 `failed` 状态
-4. 手动重试 Step 2
-5. Step 2 重试成功
-6. Step 3 继续执行
-7. Workflow 最终 `succeeded`
-
-**运行前准备**：
-同 `taskqueue-demo`（Redis Cluster + PostgreSQL）
-
-**运行**：
-```bash
-cd nsp-demo/cmd/taskqueue-demo-fail
-go run main.go
-```
-
-**预期输出**：
-```
-[Demo] Workflow submitted: xxx
-[Worker] Creating VRF (成功)
-[Worker] Creating VLAN (首次失败)
-[Demo] Workflow correctly in FAILED state. Now retrying...
-[Demo] Step retried: yyy
-[Worker] Creating VLAN (重试成功)
-[Worker] Creating firewall zone (成功)
-[Demo] ✅ Workflow SUCCEEDED after retry!
+// 4. 处理回调：更新任务状态 + 决定是否重试
+func (m *TaskManager) HandleCallback(ctx context.Context, cb *CallbackPayload) error {
+    // 1. 查询任务
+    // 2. 根据状态处理（成功/失败/重试）
+    // 3. 需要重试时重新发布到 broker
+}
 ```
 
 ---
@@ -143,21 +140,19 @@ go run main.go
 
 如果需要修改连接参数，可以在代码中修改以下常量：
 
-### taskqueue-simple
+### taskqueue-workflow-demo
 ```go
 const (
     redisAddr = "127.0.0.1:6379"
-    pgDSN     = "postgres://postgres:postgres@127.0.0.1:5432/taskqueue_simple?sslmode=disable"
+    pgDSN     = "postgres://postgres:postgres@127.0.0.1:5432/taskqueue_workflow?sslmode=disable"
 )
 ```
 
-### taskqueue-demo / taskqueue-demo-fail
+### taskqueue-broker-demo
 ```go
 const (
-    redisNode1 = "127.0.0.1:7001"
-    redisNode2 = "127.0.0.1:7002"
-    redisNode3 = "127.0.0.1:7003"
-    pgDSN      = "postgres://saga:saga123@127.0.0.1:5432/taskqueue_test?sslmode=disable"
+    redisAddr = "127.0.0.1:6379"
+    pgDSN     = "postgres://postgres:postgres@127.0.0.1:5432/taskqueue_broker?sslmode=disable"
 )
 ```
 
@@ -167,32 +162,23 @@ const (
 
 ### Redis 连接失败
 ```bash
-# 检查 Redis 是否运行
 redis-cli ping  # 应返回 PONG
-
-# 检查 Redis Cluster 状态
-redis-cli -p 7001 cluster info
 ```
 
 ### PostgreSQL 连接失败
 ```bash
-# 检查 PostgreSQL 是否运行
 psql -h localhost -U postgres -c "SELECT 1;"
-
-# 检查数据库是否存在
-psql -h localhost -U postgres -c "\l"
 ```
 
-### 工作流卡住不动
+### 任务卡住不动
 ```bash
 # 检查队列积压
-redis-cli LLEN simple_tasks
-redis-cli LLEN demo_tasks_switch
-redis-cli LLEN demo_fail_tasks_switch
+redis-cli LLEN workflow_tasks
+redis-cli LLEN broker_tasks
 
 # 检查数据库状态
-psql -d taskqueue_simple -c "SELECT * FROM tq_workflows ORDER BY created_at DESC LIMIT 5;"
-psql -d taskqueue_simple -c "SELECT * FROM tq_steps WHERE workflow_id='xxx';"
+psql -d taskqueue_workflow -c "SELECT * FROM tq_workflows ORDER BY created_at DESC LIMIT 5;"
+psql -d taskqueue_broker -c "SELECT * FROM broker_tasks ORDER BY created_at DESC LIMIT 5;"
 ```
 
 ---
@@ -205,11 +191,11 @@ psql -d taskqueue_simple -c "SELECT * FROM tq_steps WHERE workflow_id='xxx';"
 
 ---
 
-## 下一步
+## 选择哪种模式？
 
-1. 运行 `taskqueue-simple` 理解基本概念
-2. 阅读 `GUIDE.md` 学习高级功能
-3. 运行 `taskqueue-demo` 和 `taskqueue-demo-fail` 体验完整功能
-4. 集成到自己的项目中
-
-有问题？查看 `GUIDE.md` 的"故障排查"章节或提交 Issue。
+| 场景 | 推荐模式 |
+|------|----------|
+| 多步骤业务流程，需要自动推进状态 | Workflow Demo |
+| 简单独立任务，无需步骤串联 | Broker Demo |
+| 需要完全自定义任务生命周期 | Broker Demo |
+| 快速开发，最小化代码量 | Workflow Demo |

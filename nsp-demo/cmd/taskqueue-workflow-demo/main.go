@@ -1,4 +1,11 @@
-// Test RocketMQ integration
+// TaskQueue Workflow Demo
+// This example demonstrates using the Engine's full workflow orchestration capabilities.
+//
+// Prerequisites:
+//   - PostgreSQL running on localhost:5432
+//   - Redis running on localhost:6379
+//   - Database: CREATE DATABASE taskqueue_workflow;
+
 package main
 
 import (
@@ -11,32 +18,46 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 
 	"github.com/paic/nsp-common/pkg/taskqueue"
-	"github.com/paic/nsp-common/pkg/taskqueue/rocketmqbroker"
+	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
 
-var (
-	// RocketMQ and PostgreSQL config - read from environment or use defaults for local development
-	nameServer = getEnv("ROCKETMQ_NAMESERVER", "127.0.0.1:9876")
-	pgDSN      = getEnv("PG_DSN", "postgres://saga:saga123@127.0.0.1:5432/taskqueue_rmq_test?sslmode=disable")
-
-	callbackQueue = "rmq_callbacks"
-	taskQueue     = "rmq_tasks"
+const (
+	redisAddr     = "127.0.0.1:6379"
+	pgDSN         = "postgres://admin:admin123@127.0.0.1:5432/taskqueue_workflow?sslmode=disable"
+	callbackQueue = "workflow_callbacks"
+	taskQueue     = "workflow_tasks"
 )
 
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return defaultValue
+// WorkflowTask represents a task stored in PostgreSQL (for broker-only mode)
+type WorkflowTask struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Payload     string    `json:"payload"`
+	Status      string    `json:"status"`
+	Result      string    `json:"result,omitempty"`
+	ErrorMsg    string    `json:"error_msg,omitempty"`
+	RetryCount  int       `json:"retry_count"`
+	MaxRetries  int       `json:"max_retries"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
+
+const (
+	TaskStatusPending   = "pending"
+	TaskStatusRunning   = "running"
+	TaskStatusCompleted = "completed"
+	TaskStatusFailed    = "failed"
+)
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Println("========================================")
-	log.Println("RocketMQ TaskQueue Integration Test")
+	log.Println("TaskQueue Workflow Demo (Engine-based)")
 	log.Println("========================================")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -45,25 +66,19 @@ func main() {
 	// ========================================
 	// Step 1: Setup Broker
 	// ========================================
-	broker, err := rocketmqbroker.NewBroker(&rocketmqbroker.BrokerConfig{
-		NameServer: nameServer,
-		GroupName:  "test_producer_group",
-		RetryTimes: 2,
-	})
-	if err != nil {
-		log.Fatalf("[Setup] Failed to create broker: %v", err)
-	}
+	redisOpt := asynq.RedisClientOpt{Addr: redisAddr}
+	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
 	log.Println("[Setup] Broker created")
 
 	// ========================================
-	// Step 2: Setup Engine
+	// Step 2: Setup Engine (Orchestrator)
 	// ========================================
 	engine, err := taskqueue.NewEngine(&taskqueue.Config{
 		DSN:           pgDSN,
 		CallbackQueue: callbackQueue,
 		QueueRouter: func(queueTag string, priority taskqueue.Priority) string {
-			return taskQueue // Simple: all tasks go to same topic
+			return taskQueue // All tasks go to same queue
 		},
 	}, broker)
 	if err != nil {
@@ -78,21 +93,15 @@ func main() {
 	log.Println("[Setup] Database migrated")
 
 	// ========================================
-	// Step 3: Setup Worker Consumer
+	// Step 3: Setup Workers
 	// ========================================
 	callbackSender := taskqueue.NewCallbackSenderFromBroker(broker, callbackQueue)
 
 	// Worker consumer - handles tasks
-	workerConsumer, err := rocketmqbroker.NewConsumer(&rocketmqbroker.ConsumerConfig{
-		NameServer:        nameServer,
-		GroupName:         "test_worker_group",
-		Queues:            map[string]string{taskQueue: "*"}, // Subscribe to all tags
-		Concurrency:       5,
-		MaxReconsumeTimes: 3,
+	workerConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 5,
+		Queues:       map[string]int{taskQueue: 10},
 	})
-	if err != nil {
-		log.Fatalf("[Setup] Failed to create worker consumer: %v", err)
-	}
 
 	// Register task handlers
 	workerConsumer.Handle("send_email", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
@@ -123,7 +132,7 @@ func main() {
 
 		result := map[string]interface{}{
 			"message":   "Record created",
-			"record_id": "REC-RMQ-12345",
+			"record_id": "REC-12345",
 		}
 
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
@@ -133,79 +142,58 @@ func main() {
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
-	// ========================================
-	// Step 4: Setup Callback Consumer
-	// ========================================
-	callbackConsumer, err := rocketmqbroker.NewConsumer(&rocketmqbroker.ConsumerConfig{
-		NameServer:        nameServer,
-		GroupName:         "test_callback_group",
-		Queues:            map[string]string{callbackQueue: "*"},
-		Concurrency:       2,
-		MaxReconsumeTimes: 3,
+	// Callback consumer - handles callbacks
+	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 2,
+		Queues:      map[string]int{callbackQueue: 10},
 	})
-	if err != nil {
-		log.Fatalf("[Setup] Failed to create callback consumer: %v", err)
-	}
 
-	callbackConsumer.Handle("task_callback", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+	callbackConsumer.HandleRaw("task_callback", func(ctx context.Context, t *asynq.Task) error {
 		var cb taskqueue.CallbackPayload
-		if err := json.Unmarshal(payload.Params, &cb); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal callback: %w", err)
+		if err := json.Unmarshal(t.Payload(), &cb); err != nil {
+			return fmt.Errorf("failed to unmarshal callback: %w", err)
 		}
-		if err := engine.HandleCallback(ctx, &cb); err != nil {
-			return nil, err
-		}
-		return &taskqueue.TaskResult{}, nil
+		return engine.HandleCallback(ctx, &cb)
 	})
 
 	// Start consumers
-	go func() {
-		log.Println("[Setup] Starting worker consumer...")
-		if err := workerConsumer.Start(ctx); err != nil {
-			log.Printf("[Setup] Worker consumer error: %v", err)
-		}
-	}()
+	go workerConsumer.Start(ctx)
+	go callbackConsumer.Start(ctx)
+	log.Println("[Setup] Consumers started")
 
-	go func() {
-		log.Println("[Setup] Starting callback consumer...")
-		if err := callbackConsumer.Start(ctx); err != nil {
-			log.Printf("[Setup] Callback consumer error: %v", err)
-		}
-	}()
-
-	time.Sleep(5 * time.Second) // Wait for consumers to be ready
+	time.Sleep(2 * time.Second) // Wait for consumers to be ready
 
 	// ========================================
-	// Step 5: Submit Workflow
+	// Step 4: Submit Workflow
 	// ========================================
 	log.Println("========================================")
 	log.Println("[Demo] Submitting workflow")
 	log.Println("========================================")
 
 	emailParams, _ := json.Marshal(map[string]interface{}{
-		"email":   "test@example.com",
-		"subject": "RocketMQ Test",
+		"email":   "user@example.com",
+		"subject": "Welcome!",
 	})
 	recordParams, _ := json.Marshal(map[string]interface{}{
-		"record_type": "rmq_integration_test",
-		"user_id":     "U-RMQ-001",
+		"record_type": "user_registration",
+		"user_id":     "U-001",
 	})
 
 	workflowID, err := engine.SubmitWorkflow(ctx, &taskqueue.WorkflowDefinition{
-		Name:         "rmq-test-workflow",
-		ResourceType: "test",
-		ResourceID:   "test-rmq-001",
+		Name:         "user-onboarding",
+		ResourceType: "user",
+		ResourceID:   "user-001",
 		Steps: []taskqueue.StepDefinition{
 			{
 				TaskType:   "create_record",
-				TaskName:   "Create Test Record",
+				TaskName:   "Create User Record",
 				Params:     string(recordParams),
 				Priority:   taskqueue.PriorityNormal,
 				MaxRetries: 3,
 			},
 			{
 				TaskType:   "send_email",
-				TaskName:   "Send Notification Email",
+				TaskName:   "Send Welcome Email",
 				Params:     string(emailParams),
 				Priority:   taskqueue.PriorityNormal,
 				MaxRetries: 3,
@@ -218,12 +206,12 @@ func main() {
 	log.Printf("[Demo] Workflow submitted: id=%s", workflowID)
 
 	// ========================================
-	// Step 6: Poll for Completion
+	// Step 5: Poll for Completion
 	// ========================================
 	log.Println("[Demo] Polling workflow status...")
 
-	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
+	for i := 0; i < 20; i++ {
+		time.Sleep(1 * time.Second)
 
 		resp, err := engine.QueryWorkflow(ctx, workflowID)
 		if err != nil {
@@ -253,7 +241,7 @@ func main() {
 	}
 
 	// ========================================
-	// Step 7: Graceful Shutdown
+	// Step 6: Graceful Shutdown
 	// ========================================
 	log.Println("[Demo] Press Ctrl+C to exit...")
 	quit := make(chan os.Signal, 1)
@@ -262,8 +250,8 @@ func main() {
 	select {
 	case <-quit:
 		log.Println("[Demo] Shutdown signal received")
-	case <-time.After(10 * time.Second):
-		log.Println("[Demo] Auto-exit after 10 seconds")
+	case <-time.After(5 * time.Second):
+		log.Println("[Demo] Auto-exit after 5 seconds")
 	}
 
 	workerConsumer.Stop()
