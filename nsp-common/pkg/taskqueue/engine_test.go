@@ -626,13 +626,15 @@ func TestGetWorkflowsByResourceID(t *testing.T) {
 	}
 }
 
-func TestHookError_PropagatesUp(t *testing.T) {
+func TestHookError_NonBlocking(t *testing.T) {
+	hookCalled := false
 	hooks := &WorkflowHooks{
 		OnStepComplete: func(_ context.Context, _ *Workflow, _ *StepTask) error {
+			hookCalled = true
 			return fmt.Errorf("hook exploded")
 		},
 	}
-	engine, store, _ := newTestEngine(hooks)
+	engine, store, broker := newTestEngine(hooks)
 	ctx := context.Background()
 
 	def := &WorkflowDefinition{
@@ -655,14 +657,22 @@ func TestHookError_PropagatesUp(t *testing.T) {
 		}
 	}
 
+	publishedBefore := broker.publishedCount()
+
+	// Hook error should NOT block workflow progression
 	err := engine.HandleCallback(ctx, &CallbackPayload{
 		TaskID: stepA.ID,
 		Status: "completed",
 	})
-	if err == nil {
-		t.Fatal("expected error from hook, got nil")
+	if err != nil {
+		t.Fatalf("expected no error (hook errors are non-blocking), got: %v", err)
 	}
-	if err.Error() != "OnStepComplete hook failed: hook exploded" {
-		t.Errorf("unexpected error: %v", err)
+	if !hookCalled {
+		t.Fatal("expected hook to be called")
+	}
+
+	// Verify step_b was still enqueued despite hook error
+	if broker.publishedCount() <= publishedBefore {
+		t.Error("expected step_b to be enqueued despite hook error")
 	}
 }

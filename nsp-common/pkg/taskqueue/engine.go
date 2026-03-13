@@ -353,14 +353,13 @@ func (e *Engine) handleStepSuccess(ctx context.Context, step *StepTask) error {
 		return fmt.Errorf("failed to increment completed steps: %w", err)
 	}
 
-	// Invoke OnStepComplete hook
+	// Invoke OnStepComplete hook (non-blocking: log error but continue workflow)
 	if e.hooks != nil && e.hooks.OnStepComplete != nil {
 		wf, err := e.store.GetWorkflow(ctx, step.WorkflowID)
 		if err != nil {
-			return fmt.Errorf("failed to get workflow for hook: %w", err)
-		}
-		if err := e.hooks.OnStepComplete(ctx, wf, step); err != nil {
-			return fmt.Errorf("OnStepComplete hook failed: %w", err)
+			log.Printf("[taskqueue] WARNING: failed to get workflow for OnStepComplete hook: %v", err)
+		} else if err := e.hooks.OnStepComplete(ctx, wf, step); err != nil {
+			log.Printf("[taskqueue] WARNING: OnStepComplete hook failed (workflow will continue): %v", err)
 		}
 	}
 
@@ -413,20 +412,21 @@ func (e *Engine) handleStepFailure(ctx context.Context, step *StepTask, errorMsg
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
 
-	// Invoke OnStepFailed and OnWorkflowFailed hooks
+	// Invoke OnStepFailed and OnWorkflowFailed hooks (non-blocking: log error but don't stall)
 	if e.hooks != nil {
 		wf, err := e.store.GetWorkflow(ctx, step.WorkflowID)
 		if err != nil {
-			return fmt.Errorf("failed to get workflow for hook: %w", err)
-		}
-		if e.hooks.OnStepFailed != nil {
-			if err := e.hooks.OnStepFailed(ctx, wf, step, errorMsg); err != nil {
-				return fmt.Errorf("OnStepFailed hook failed: %w", err)
+			log.Printf("[taskqueue] WARNING: failed to get workflow for failure hooks: %v", err)
+		} else {
+			if e.hooks.OnStepFailed != nil {
+				if err := e.hooks.OnStepFailed(ctx, wf, step, errorMsg); err != nil {
+					log.Printf("[taskqueue] WARNING: OnStepFailed hook failed: %v", err)
+				}
 			}
-		}
-		if e.hooks.OnWorkflowFailed != nil {
-			if err := e.hooks.OnWorkflowFailed(ctx, wf, errorMsg); err != nil {
-				return fmt.Errorf("OnWorkflowFailed hook failed: %w", err)
+			if e.hooks.OnWorkflowFailed != nil {
+				if err := e.hooks.OnWorkflowFailed(ctx, wf, errorMsg); err != nil {
+					log.Printf("[taskqueue] WARNING: OnWorkflowFailed hook failed: %v", err)
+				}
 			}
 		}
 	}
@@ -445,14 +445,13 @@ func (e *Engine) checkAndCompleteWorkflow(ctx context.Context, workflowID string
 	if completed {
 		log.Printf("[taskqueue] workflow succeeded: id=%s", workflowID)
 
-		// Invoke OnWorkflowComplete hook
+		// Invoke OnWorkflowComplete hook (non-blocking: log error but don't stall)
 		if e.hooks != nil && e.hooks.OnWorkflowComplete != nil {
 			wf, err := e.store.GetWorkflow(ctx, workflowID)
 			if err != nil {
-				return fmt.Errorf("failed to get workflow for hook: %w", err)
-			}
-			if err := e.hooks.OnWorkflowComplete(ctx, wf); err != nil {
-				return fmt.Errorf("OnWorkflowComplete hook failed: %w", err)
+				log.Printf("[taskqueue] WARNING: failed to get workflow for OnWorkflowComplete hook: %v", err)
+			} else if err := e.hooks.OnWorkflowComplete(ctx, wf); err != nil {
+				log.Printf("[taskqueue] WARNING: OnWorkflowComplete hook failed: %v", err)
 			}
 		}
 	}
