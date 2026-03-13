@@ -39,3 +39,4 @@ CREATE TABLE IF NOT EXISTS tq_steps (
 
 CREATE INDEX IF NOT EXISTS idx_tq_steps_workflow_order  ON tq_steps(workflow_id, step_order);
 CREATE INDEX IF NOT EXISTS idx_tq_steps_workflow_status ON tq_steps(workflow_id, status);
+CREATE INDEX IF NOT EXISTS idx_tq_workflows_resource    ON tq_workflows(resource_type, resource_id);

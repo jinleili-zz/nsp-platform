@@ -20,6 +20,9 @@ type Config struct {
 	// QueueRouter computes the target queue name for a step.
 	// If nil, DefaultQueueRouter is used.
 	QueueRouter QueueRouterFunc
+	// Hooks provides optional lifecycle callbacks for workflow/step transitions.
+	// If nil, no hooks are called.
+	Hooks *WorkflowHooks
 }
 
 // QueueRouterFunc computes the target queue name for a given step.
@@ -53,6 +56,7 @@ type Engine struct {
 	db          *sql.DB
 	config      *Config
 	queueRouter QueueRouterFunc
+	hooks       *WorkflowHooks
 }
 
 // NewEngine creates a new Engine.
@@ -88,6 +92,7 @@ func NewEngine(cfg *Config, broker Broker) (*Engine, error) {
 		db:          db,
 		config:      cfg,
 		queueRouter: router,
+		hooks:       cfg.Hooks,
 	}, nil
 }
 
@@ -103,6 +108,7 @@ func NewEngineWithStore(cfg *Config, broker Broker, store Store) *Engine {
 		store:       store,
 		config:      cfg,
 		queueRouter: router,
+		hooks:       cfg.Hooks,
 	}
 }
 
@@ -347,6 +353,17 @@ func (e *Engine) handleStepSuccess(ctx context.Context, step *StepTask) error {
 		return fmt.Errorf("failed to increment completed steps: %w", err)
 	}
 
+	// Invoke OnStepComplete hook
+	if e.hooks != nil && e.hooks.OnStepComplete != nil {
+		wf, err := e.store.GetWorkflow(ctx, step.WorkflowID)
+		if err != nil {
+			return fmt.Errorf("failed to get workflow for hook: %w", err)
+		}
+		if err := e.hooks.OnStepComplete(ctx, wf, step); err != nil {
+			return fmt.Errorf("OnStepComplete hook failed: %w", err)
+		}
+	}
+
 	nextStep, err := e.store.GetNextPendingStep(ctx, step.WorkflowID)
 	if err != nil {
 		return fmt.Errorf("failed to get next pending step: %w", err)
@@ -396,6 +413,24 @@ func (e *Engine) handleStepFailure(ctx context.Context, step *StepTask, errorMsg
 		return fmt.Errorf("failed to update workflow status: %w", err)
 	}
 
+	// Invoke OnStepFailed and OnWorkflowFailed hooks
+	if e.hooks != nil {
+		wf, err := e.store.GetWorkflow(ctx, step.WorkflowID)
+		if err != nil {
+			return fmt.Errorf("failed to get workflow for hook: %w", err)
+		}
+		if e.hooks.OnStepFailed != nil {
+			if err := e.hooks.OnStepFailed(ctx, wf, step, errorMsg); err != nil {
+				return fmt.Errorf("OnStepFailed hook failed: %w", err)
+			}
+		}
+		if e.hooks.OnWorkflowFailed != nil {
+			if err := e.hooks.OnWorkflowFailed(ctx, wf, errorMsg); err != nil {
+				return fmt.Errorf("OnWorkflowFailed hook failed: %w", err)
+			}
+		}
+	}
+
 	log.Printf("[taskqueue] workflow failed: id=%s, step=%s, retries_exhausted=%d, error=%s",
 		step.WorkflowID, step.TaskName, step.MaxRetries, errorMsg)
 	return nil
@@ -409,6 +444,17 @@ func (e *Engine) checkAndCompleteWorkflow(ctx context.Context, workflowID string
 	}
 	if completed {
 		log.Printf("[taskqueue] workflow succeeded: id=%s", workflowID)
+
+		// Invoke OnWorkflowComplete hook
+		if e.hooks != nil && e.hooks.OnWorkflowComplete != nil {
+			wf, err := e.store.GetWorkflow(ctx, workflowID)
+			if err != nil {
+				return fmt.Errorf("failed to get workflow for hook: %w", err)
+			}
+			if err := e.hooks.OnWorkflowComplete(ctx, wf); err != nil {
+				return fmt.Errorf("OnWorkflowComplete hook failed: %w", err)
+			}
+		}
 	}
 	return nil
 }
