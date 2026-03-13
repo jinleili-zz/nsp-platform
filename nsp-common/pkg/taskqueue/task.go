@@ -1,6 +1,9 @@
 package taskqueue
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Priority defines task execution priority levels.
 type Priority int
@@ -141,4 +144,24 @@ type WorkflowStatusResponse struct {
 	Workflow *Workflow    `json:"workflow"`
 	Steps    []*StepTask `json:"steps"`
 	Stats    *StepStats  `json:"stats"`
+}
+
+// WorkflowHooks provides lifecycle callbacks that the Engine invokes
+// at key points in the workflow state machine. Business code uses these
+// hooks to synchronise external resources (e.g. vpc_resources table)
+// with workflow/step state transitions managed by the Engine.
+// All fields are optional — nil hooks are silently skipped.
+type WorkflowHooks struct {
+	// OnStepComplete is called after a step succeeds and tq_steps is updated,
+	// before the next step is enqueued.
+	OnStepComplete func(ctx context.Context, workflow *Workflow, step *StepTask) error
+	// OnStepFailed is called when a step's retries are exhausted and the
+	// workflow is about to be marked as failed.
+	OnStepFailed func(ctx context.Context, workflow *Workflow, step *StepTask, errMsg string) error
+	// OnWorkflowComplete is called after the workflow is atomically marked
+	// as succeeded (all steps completed, zero failures).
+	OnWorkflowComplete func(ctx context.Context, workflow *Workflow) error
+	// OnWorkflowFailed is called after the workflow is marked as failed
+	// (a step exhausted all retries).
+	OnWorkflowFailed func(ctx context.Context, workflow *Workflow, errMsg string) error
 }

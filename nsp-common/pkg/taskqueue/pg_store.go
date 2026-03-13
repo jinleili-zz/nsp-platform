@@ -92,6 +92,49 @@ func (s *PostgresStore) GetWorkflow(ctx context.Context, id string) (*Workflow, 
 	return wf, nil
 }
 
+// GetWorkflowsByResourceID returns all workflows for a given resource, ordered by created_at DESC.
+func (s *PostgresStore) GetWorkflowsByResourceID(ctx context.Context, resourceType, resourceID string) ([]*Workflow, error) {
+	query := `
+		SELECT id, name, resource_type, resource_id, status,
+		       total_steps, completed_steps, failed_steps, error_message, metadata,
+		       created_at, updated_at
+		FROM tq_workflows
+		WHERE resource_type = $1 AND resource_id = $2
+		ORDER BY created_at DESC
+	`
+	rows, err := s.db.QueryContext(ctx, query, resourceType, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query workflows by resource: %w", err)
+	}
+	defer rows.Close()
+
+	var workflows []*Workflow
+	for rows.Next() {
+		wf := &Workflow{}
+		var status string
+		var errorMsg sql.NullString
+		var metadataJSON []byte
+
+		if err := rows.Scan(
+			&wf.ID, &wf.Name, &wf.ResourceType, &wf.ResourceID, &status,
+			&wf.TotalSteps, &wf.CompletedSteps, &wf.FailedSteps, &errorMsg, &metadataJSON,
+			&wf.CreatedAt, &wf.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan workflow: %w", err)
+		}
+
+		wf.Status = WorkflowStatus(status)
+		if errorMsg.Valid {
+			wf.ErrorMessage = errorMsg.String
+		}
+		if len(metadataJSON) > 0 {
+			_ = json.Unmarshal(metadataJSON, &wf.Metadata)
+		}
+		workflows = append(workflows, wf)
+	}
+	return workflows, rows.Err()
+}
+
 // UpdateWorkflowStatus updates workflow status and error message.
 func (s *PostgresStore) UpdateWorkflowStatus(ctx context.Context, id string, status WorkflowStatus, errorMsg string) error {
 	query := `UPDATE tq_workflows SET status = $2, error_message = $3, updated_at = $4 WHERE id = $1`

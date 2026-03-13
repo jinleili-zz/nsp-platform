@@ -12,6 +12,9 @@ type Store interface {
 	// --- Workflow ---
 	CreateWorkflow(ctx context.Context, wf *Workflow) error
 	GetWorkflow(ctx context.Context, id string) (*Workflow, error)
+	// GetWorkflowsByResourceID returns all workflows for a given resource, ordered by created_at DESC.
+	// This is needed because business APIs query by resource ID (e.g. vpc_id), not workflow UUID.
+	GetWorkflowsByResourceID(ctx context.Context, resourceType, resourceID string) ([]*Workflow, error)
 	UpdateWorkflowStatus(ctx context.Context, id string, status WorkflowStatus, errorMsg string) error
 	IncrementCompletedSteps(ctx context.Context, id string) error
 	IncrementFailedSteps(ctx context.Context, id string) error
