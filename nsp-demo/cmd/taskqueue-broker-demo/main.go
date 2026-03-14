@@ -25,6 +25,8 @@ import (
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/trace"
 	"github.com/paic/nsp-common/pkg/taskqueue"
 	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
@@ -274,6 +276,13 @@ func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload st
 		Queue:   taskQueue,
 	}
 
+	// 注入当前 trace context 的 metadata，供 worker 恢复追踪上下文
+	metadata := trace.MetadataFromContext(ctx)
+	if metadata != nil {
+		asynqTask.Metadata = metadata
+		log.Printf("[Manager] Attaching trace metadata: trace_id=%s", metadata["trace_id"])
+	}
+
 	info, err := m.broker.Publish(ctx, asynqTask)
 	if err != nil {
 		// Mark as failed if publish fails
@@ -285,13 +294,25 @@ func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload st
 	m.store.UpdateBrokerTaskID(ctx, taskID, info.BrokerTaskID)
 	m.store.UpdateStatus(ctx, taskID, TaskStatusRunning, "")
 
-	log.Printf("[Manager] Task submitted: id=%s, type=%s, broker_id=%s", taskID, taskType, info.BrokerTaskID)
+	log.Printf("[Manager] Task submitted: id=%s, type=%s, broker_id=%s | trace_id=%s",
+		taskID, taskType, info.BrokerTaskID, getTraceID(ctx))
 	return taskID, nil
+}
+
+// getTraceID 从 context 中获取 trace_id（辅助函数）
+func getTraceID(ctx context.Context) string {
+	tc, ok := trace.TraceFromContext(ctx)
+	if ok && tc != nil {
+		return tc.TraceID
+	}
+	return ""
 }
 
 // HandleCallback processes callback from worker (custom implementation)
 func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.CallbackPayload) error {
-	log.Printf("[Manager] Callback received: task_id=%s, status=%s", cb.TaskID, cb.Status)
+	tc := trace.MustTraceFromContext(ctx)
+	log.Printf("[Manager] Callback received: task_id=%s, status=%s | trace_id=%s",
+		cb.TaskID, cb.Status, tc.TraceID)
 
 	task, err := m.store.GetByID(ctx, cb.TaskID)
 	if err != nil {
@@ -327,6 +348,12 @@ func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.Callback
 				Queue:   taskQueue,
 			}
 
+			// 重试时保留 trace metadata
+			metadata := trace.MetadataFromContext(ctx)
+			if metadata != nil {
+				asynqTask.Metadata = metadata
+			}
+
 			info, err := m.broker.Publish(ctx, asynqTask)
 			if err != nil {
 				m.store.UpdateStatus(ctx, cb.TaskID, TaskStatusFailed, err.Error())
@@ -335,7 +362,8 @@ func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.Callback
 
 			m.store.UpdateBrokerTaskID(ctx, cb.TaskID, info.BrokerTaskID)
 			m.store.UpdateStatus(ctx, cb.TaskID, TaskStatusRunning, "")
-			log.Printf("[Manager] Task re-queued for retry: id=%s, retry=%d/%d", cb.TaskID, task.RetryCount+1, task.MaxRetries)
+			log.Printf("[Manager] Task re-queued for retry: id=%s, retry=%d/%d | trace_id=%s",
+				cb.TaskID, task.RetryCount+1, task.MaxRetries, tc.TraceID)
 			return nil
 		}
 
@@ -393,23 +421,57 @@ func (s *CallbackSender) send(ctx context.Context, taskID, status string, result
 		Queue:   s.queue,
 	}
 
+	// 注入当前 trace context 的 metadata
+	metadata := trace.MetadataFromContext(ctx)
+	if metadata != nil {
+		task.Metadata = metadata
+	}
+
 	_, err := s.broker.Publish(ctx, task)
 	if err != nil {
 		return fmt.Errorf("failed to publish callback: %w", err)
 	}
 
-	log.Printf("[Callback] Sent: task_id=%s, status=%s", taskID, status)
+	tc := trace.MustTraceFromContext(ctx)
+	log.Printf("[Callback] Sent: task_id=%s, status=%s | trace_id=%s", taskID, status, tc.TraceID)
 	return nil
+}
+
+// 在日志中打印追踪字段
+func logWithTrace(ctx context.Context, msg string) {
+	tc := trace.MustTraceFromContext(ctx)
+	fields := tc.LogFields()
+	log.Printf("[TRACE] %s | trace_id=%s | span_id=%s | parent_span_id=%s | instance_id=%s",
+		msg, tc.TraceID, tc.SpanId, tc.ParentSpanId, fields["instance_id"])
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// 获取实例 ID（用于链路追踪）
+	instanceId := trace.GetInstanceId()
+	log.Printf("[Setup] Instance ID: %s", instanceId)
+
 	log.Println("========================================")
 	log.Println("TaskQueue Broker Demo (Custom Implementation)")
 	log.Println("========================================")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 为整个 demo 生成一个根 TraceContext（模拟入口请求）
+	rootTC := &trace.TraceContext{
+		TraceID:      trace.NewTraceID(),
+		SpanId:       trace.NewSpanId(),
+		ParentSpanId: "", // root span
+		InstanceId:   instanceId,
+		Sampled:      true,
+	}
+	ctx = trace.ContextWithTrace(ctx, rootTC)
+	ctx = logger.ContextWithTraceID(ctx, rootTC.TraceID)
+	ctx = logger.ContextWithSpanID(ctx, rootTC.SpanId)
+
+	log.Printf("[Demo] Root TraceID: %s", rootTC.TraceID)
 
 	// ========================================
 	// Step 1: Setup Broker
@@ -452,6 +514,11 @@ func main() {
 
 	// Register task handlers
 	workerConsumer.Handle("send_email", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		// 从 context 中提取 TraceContext（由 broker 传递的 metadata 恢复）
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Worker] Processing send_email | trace_id=%s | span_id=%s | parent_span_id=%s",
+			tc.TraceID, tc.SpanId, tc.ParentSpanId)
+
 		var params map[string]interface{}
 		json.Unmarshal(payload.Params, &params)
 
@@ -466,11 +533,16 @@ func main() {
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
 			return nil, err
 		}
-		log.Printf("[Worker] Email sent to: %v", params["email"])
+		log.Printf("[Worker] Email sent to: %v | trace_id=%s", params["email"], tc.TraceID)
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
 	workerConsumer.Handle("create_record", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Worker] Processing create_record | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
 		var params map[string]interface{}
 		json.Unmarshal(payload.Params, &params)
 
@@ -485,13 +557,14 @@ func main() {
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
 			return nil, err
 		}
-		log.Printf("[Worker] Record created: %v", params["record_type"])
+		log.Printf("[Worker] Record created: %v | trace_id=%s", params["record_type"], tc.TraceID)
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
 	// Handler for always_fail task (to test retry logic)
 	workerConsumer.Handle("always_fail", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		log.Printf("[Worker] Always fail task executed (task_id=%s)", payload.TaskID)
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Worker] Always fail task executed (task_id=%s) | trace_id=%s", payload.TaskID, tc.TraceID)
 		// Always return error to trigger retry
 		if err := callbackSender.Fail(ctx, payload.TaskID, "Simulated failure for retry test"); err != nil {
 			return nil, err
@@ -510,6 +583,12 @@ func main() {
 		if err := json.Unmarshal(t.Payload(), &cb); err != nil {
 			return fmt.Errorf("failed to unmarshal callback: %w", err)
 		}
+
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Callback] Processing callback for task_id=%s | trace_id=%s | status=%s",
+			cb.TaskID, tc.TraceID, cb.Status)
+
 		return manager.HandleCallback(ctx, &cb)
 	})
 
