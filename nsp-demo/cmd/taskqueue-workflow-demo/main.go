@@ -21,6 +21,8 @@ import (
 	"github.com/hibiken/asynq"
 	_ "github.com/lib/pq"
 
+	"github.com/paic/nsp-common/pkg/logger"
+	"github.com/paic/nsp-common/pkg/trace"
 	"github.com/paic/nsp-common/pkg/taskqueue"
 	"github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
 )
@@ -56,12 +58,31 @@ const (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// 获取实例 ID（用于链路追踪）
+	instanceId := trace.GetInstanceId()
+	log.Printf("[Setup] Instance ID: %s", instanceId)
+
 	log.Println("========================================")
 	log.Println("TaskQueue Workflow Demo (Engine-based)")
 	log.Println("========================================")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 为整个 demo 生成一个根 TraceContext（模拟入口请求）
+	rootTC := &trace.TraceContext{
+		TraceID:      trace.NewTraceID(),
+		SpanId:       trace.NewSpanId(),
+		ParentSpanId: "", // root span
+		InstanceId:   instanceId,
+		Sampled:      true,
+	}
+	ctx = trace.ContextWithTrace(ctx, rootTC)
+	ctx = logger.ContextWithTraceID(ctx, rootTC.TraceID)
+	ctx = logger.ContextWithSpanID(ctx, rootTC.SpanId)
+
+	log.Printf("[Demo] Root TraceID: %s", rootTC.TraceID)
 
 	// ========================================
 	// Step 1: Setup Broker
@@ -105,6 +126,11 @@ func main() {
 
 	// Register task handlers
 	workerConsumer.Handle("send_email", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Worker] Processing send_email | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
 		var params map[string]interface{}
 		json.Unmarshal(payload.Params, &params)
 
@@ -119,11 +145,16 @@ func main() {
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
 			return nil, err
 		}
-		log.Printf("[Worker] Email sent to: %v", params["email"])
+		log.Printf("[Worker] Email sent to: %v | trace_id=%s", params["email"], tc.TraceID)
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
 	workerConsumer.Handle("create_record", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Worker] Processing create_record | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
 		var params map[string]interface{}
 		json.Unmarshal(payload.Params, &params)
 
@@ -138,7 +169,7 @@ func main() {
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
 			return nil, err
 		}
-		log.Printf("[Worker] Record created: %v", params["record_type"])
+		log.Printf("[Worker] Record created: %v | trace_id=%s", params["record_type"], tc.TraceID)
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
@@ -153,6 +184,12 @@ func main() {
 		if err := json.Unmarshal(t.Payload(), &cb); err != nil {
 			return fmt.Errorf("failed to unmarshal callback: %w", err)
 		}
+
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Callback] Processing callback for task_id=%s | trace_id=%s | status=%s",
+			cb.TaskID, tc.TraceID, cb.Status)
+
 		return engine.HandleCallback(ctx, &cb)
 	})
 
