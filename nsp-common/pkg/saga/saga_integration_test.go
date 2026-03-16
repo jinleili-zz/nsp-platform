@@ -797,7 +797,13 @@ func TestIntegration_MultiInstanceExclusivity(t *testing.T) {
 
 	// Verify all transactions reached terminal state
 	for _, txID := range txIDs {
-		st, _ := engine1.Query(ctx, txID)
+		st, err := engine1.Query(ctx, txID)
+		if err != nil {
+			t.Fatalf("TC-10 FAIL: query txID=%s: %v", txID, err)
+		}
+		if st == nil {
+			t.Fatalf("TC-10 FAIL: txID=%s not found", txID)
+		}
 		if st.Status != "succeeded" {
 			t.Fatalf("TC-10 FAIL: txID=%s expected succeeded, got %s", txID, st.Status)
 		}

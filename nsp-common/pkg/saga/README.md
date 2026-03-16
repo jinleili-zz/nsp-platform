@@ -10,7 +10,7 @@ SAGA 模块是一个嵌入式的分布式事务 SDK，以后台 goroutine 方式
 - **补偿回滚**: 步骤失败时自动逆序执行已完成步骤的补偿操作
 - **崩溃恢复**: 引擎重启后自动恢复未完成的事务
 - **超时处理**: 支持事务级别超时，超时后自动触发补偿
-- **分布式安全**: 使用 `FOR UPDATE SKIP LOCKED` 保证多实例环境下的任务分配安全
+- **分布式安全**: 使用 `FOR UPDATE SKIP LOCKED` + 租约锁 + CAS 状态更新，保证多实例环境下的任务分配和状态变更安全
 - **模板变量**: 支持在 URL 和 Payload 中使用模板变量引用上下文数据
 
 ---
@@ -114,6 +114,8 @@ psql -h localhost -U saga -d saga_test -f migrations/saga.sql
 | payload | JSONB | 全局负载数据 |
 | current_step | INT | 当前步骤索引 |
 | timeout_at | TIMESTAMPTZ | 超时时间 |
+| locked_by | VARCHAR(128) | 持有锁的实例 ID (多实例并发控制) |
+| locked_until | TIMESTAMPTZ | 锁过期时间，超过此时间其他实例可抢占 |
 
 #### 2. saga_steps (步骤表)
 
@@ -357,7 +359,8 @@ PollSuccessValue: "success"
 | `PollScanInterval` | Duration | 3s | 轮询扫描间隔 |
 | `CoordScanInterval` | Duration | 5s | 协调器扫描间隔 |
 | `HTTPTimeout` | Duration | 30s | HTTP 请求超时时间 |
-| `InstanceID` | string | auto | 实例 ID (自动生成) |
+| `InstanceID` | string | auto | 实例 ID (自动生成: hostname-pid) |
+| `LeaseDuration` | Duration | 5m | 分布式锁租约时长 (Coordinator 内部配置) |
 
 ---
 
@@ -410,6 +413,7 @@ saga.NewSaga("name").
 - `saga_transactions` 表中 `status = 'failed'` 的记录
 - `status = 'compensating'` 且长时间未变化的记录
 - `saga_poll_tasks` 表中 `locked_until` 过期的任务
+- `saga_transactions` 表中 `locked_until` 过期但状态仍为 running 的事务（可能需要人工介入）
 
 ---
 
@@ -424,21 +428,84 @@ saga.NewSaga("name").
 
 ---
 
+## 多实例并发安全
+
+SAGA 模块支持多实例部署，通过以下机制保证并发安全：
+
+### 1. 分布式锁机制
+
+每个事务在被处理前需要获取分布式锁：
+
+```
+saga_transactions 表新增字段：
+- locked_by:    VARCHAR(128)  -- 持有锁的实例 ID
+- locked_until: TIMESTAMPTZ   -- 锁过期时间
+```
+
+锁获取规则（`ClaimTransaction`）：
+- 仅当 `locked_by IS NULL` 或 `locked_until < NOW()` 或 `locked_by = 本实例` 时可获取
+- 支持可重入（同一实例可续期）
+- 仅对非终态事务（pending/running/compensating）加锁
+
+### 2. CAS 状态更新
+
+状态变更使用 Compare-And-Swap 语义（`UpdateTransactionStatusCAS`）：
+
+```sql
+UPDATE saga_transactions
+SET status = $new_status
+WHERE id = $id AND status = $expected_status
+```
+
+仅当当前状态匹配预期时才更新，防止并发覆盖。
+
+### 3. 任务扫描安全
+
+恢复扫描和超时扫描使用 `FOR UPDATE SKIP LOCKED`：
+
+```sql
+SELECT * FROM saga_transactions
+WHERE status IN ('pending', 'running', 'compensating')
+  AND (locked_by IS NULL OR locked_until < NOW())
+FOR UPDATE SKIP LOCKED
+```
+
+- 已被锁定的事务会被跳过，不会阻塞
+- 扫描后立即设置 `locked_by` 和 `locked_until`
+- 处理完成或失败后释放锁
+
+### 4. 崩溃恢复
+
+实例崩溃后：
+1. 其持有的锁会在 `locked_until` 过期后自动释放
+2. 其他实例在下次扫描时可接管未完成事务
+3. 默认租约时长 5 分钟，可通过 `LeaseDuration` 配置
+
+### 5. 实例标识
+
+每个实例需要唯一的 `InstanceID`：
+- 默认自动生成：`hostname-pid`
+- 可通过配置显式指定
+- 用于锁归属识别和锁释放验证
+
+---
+
 ## 文件结构
 
 ```
 nsp-common/
 ├── migrations/
-│   └── saga.sql              # 数据库建表脚本
+│   └── saga.sql                   # 数据库建表脚本
 └── pkg/saga/
-    ├── coordinator.go        # 协调器（状态机驱动）
-    ├── definition.go         # SAGA/Step 定义结构
-    ├── engine.go             # 引擎入口 API
-    ├── executor.go           # HTTP 执行器
-    ├── jsonpath.go           # JSONPath 解析
-    ├── poller.go             # 异步轮询器
-    ├── saga_test.go          # 集成测试
-    ├── store.go              # PostgreSQL 持久化
-    ├── template.go           # 模板变量渲染
-    └── README.md             # 本文档
+    ├── coordinator.go             # 协调器（状态机驱动）
+    ├── definition.go              # SAGA/Step 定义结构
+    ├── engine.go                  # 引擎入口 API
+    ├── executor.go                # HTTP 执行器
+    ├── jsonpath.go                # JSONPath 解析
+    ├── poller.go                  # 异步轮询器
+    ├── saga_test.go               # 单元测试
+    ├── saga_integration_test.go   # 多实例集成测试
+    ├── store.go                   # PostgreSQL 持久化
+    ├── template.go                # 模板变量渲染
+    └── README.md                  # 本文档
 ```
