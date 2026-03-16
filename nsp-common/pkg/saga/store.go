@@ -35,13 +35,18 @@ type Store interface {
 	CreatePollTask(ctx context.Context, task *PollTask) error
 	DeletePollTask(ctx context.Context, stepID string) error
 
-	// Recovery operations
-	ListRecoverableTransactions(ctx context.Context) ([]*Transaction, error)
-	ListTimedOutTransactions(ctx context.Context) ([]*Transaction, error)
+	// Recovery operations (multi-instance safe with FOR UPDATE SKIP LOCKED)
+	ListRecoverableTransactions(ctx context.Context, instanceID string, batchSize int, leaseDuration time.Duration) ([]*Transaction, error)
+	ListTimedOutTransactions(ctx context.Context, instanceID string, leaseDuration time.Duration) ([]*Transaction, error)
 
 	// Distributed poll task operations
 	AcquirePollTasks(ctx context.Context, instanceID string, batchSize int) ([]*PollTask, error)
 	ReleasePollTask(ctx context.Context, stepID string) error
+
+	// Distributed coordination operations
+	ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool, error)
+	ReleaseTransaction(ctx context.Context, txID string, instanceID string) error
+	UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus, lastError string) (bool, error)
 }
 
 // PostgresStore implements Store interface using PostgreSQL.
@@ -686,22 +691,34 @@ func (s *PostgresStore) DeletePollTask(ctx context.Context, stepID string) error
 }
 
 // ListRecoverableTransactions returns transactions that need recovery after crash.
-// These are transactions in running or compensating status.
-func (s *PostgresStore) ListRecoverableTransactions(ctx context.Context) ([]*Transaction, error) {
-	query := `
+// Uses FOR UPDATE SKIP LOCKED to ensure multi-instance safety.
+// Transactions are claimed (locked_by/locked_until set) atomically within the same DB transaction.
+func (s *PostgresStore) ListRecoverableTransactions(ctx context.Context, instanceID string, batchSize int, leaseDuration time.Duration) ([]*Transaction, error) {
+	lockedUntil := time.Now().Add(leaseDuration)
+
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer dbTx.Rollback()
+
+	selectQuery := `
 		SELECT id, status, payload, current_step, created_at, updated_at, finished_at, timeout_at, retry_count, last_error
 		FROM saga_transactions
 		WHERE status IN ('pending', 'running', 'compensating')
+		  AND (locked_by IS NULL OR locked_until < NOW())
 		ORDER BY created_at
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := dbTx.QueryContext(ctx, selectQuery, batchSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query recoverable transactions: %w", err)
 	}
-	defer rows.Close()
 
 	var txs []*Transaction
+	var txIDs []string
 	for rows.Next() {
 		var tx Transaction
 		var payloadJSON []byte
@@ -720,6 +737,7 @@ func (s *PostgresStore) ListRecoverableTransactions(ctx context.Context) ([]*Tra
 			&lastError,
 		)
 		if err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("failed to scan transaction: %w", err)
 		}
 
@@ -727,37 +745,70 @@ func (s *PostgresStore) ListRecoverableTransactions(ctx context.Context) ([]*Tra
 		tx.LastError = lastError.String
 		if len(payloadJSON) > 0 {
 			if err := json.Unmarshal(payloadJSON, &tx.Payload); err != nil {
+				rows.Close()
 				return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
 			}
 		}
 		txs = append(txs, &tx)
+		txIDs = append(txIDs, tx.ID)
 	}
+	rows.Close()
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating transactions: %w", err)
+	}
+
+	// Batch claim all selected transactions within the same DB transaction
+	if len(txIDs) > 0 {
+		updateQuery := `
+			UPDATE saga_transactions
+			SET locked_by = $1, locked_until = $2, updated_at = NOW()
+			WHERE id = ANY($3)
+		`
+		_, err = dbTx.ExecContext(ctx, updateQuery, instanceID, lockedUntil, pq.Array(txIDs))
+		if err != nil {
+			return nil, fmt.Errorf("failed to claim transactions: %w", err)
+		}
+	}
+
+	if err := dbTx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit: %w", err)
 	}
 
 	return txs, nil
 }
 
 // ListTimedOutTransactions returns transactions that have exceeded their timeout.
-func (s *PostgresStore) ListTimedOutTransactions(ctx context.Context) ([]*Transaction, error) {
-	query := `
+// Uses FOR UPDATE SKIP LOCKED to ensure multi-instance safety.
+// Transactions are claimed atomically within the same DB transaction.
+func (s *PostgresStore) ListTimedOutTransactions(ctx context.Context, instanceID string, leaseDuration time.Duration) ([]*Transaction, error) {
+	lockedUntil := time.Now().Add(leaseDuration)
+
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer dbTx.Rollback()
+
+	selectQuery := `
 		SELECT id, status, payload, current_step, created_at, updated_at, finished_at, timeout_at, retry_count, last_error
 		FROM saga_transactions
 		WHERE status IN ('running', 'compensating')
 		  AND timeout_at IS NOT NULL
 		  AND timeout_at < NOW()
+		  AND (locked_by IS NULL OR locked_until < NOW())
 		ORDER BY timeout_at
+		LIMIT 50
+		FOR UPDATE SKIP LOCKED
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := dbTx.QueryContext(ctx, selectQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query timed out transactions: %w", err)
 	}
-	defer rows.Close()
 
 	var txs []*Transaction
+	var txIDs []string
 	for rows.Next() {
 		var tx Transaction
 		var payloadJSON []byte
@@ -776,6 +827,7 @@ func (s *PostgresStore) ListTimedOutTransactions(ctx context.Context) ([]*Transa
 			&lastError,
 		)
 		if err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("failed to scan transaction: %w", err)
 		}
 
@@ -783,14 +835,33 @@ func (s *PostgresStore) ListTimedOutTransactions(ctx context.Context) ([]*Transa
 		tx.LastError = lastError.String
 		if len(payloadJSON) > 0 {
 			if err := json.Unmarshal(payloadJSON, &tx.Payload); err != nil {
+				rows.Close()
 				return nil, fmt.Errorf("failed to unmarshal payload: %w", err)
 			}
 		}
 		txs = append(txs, &tx)
+		txIDs = append(txIDs, tx.ID)
 	}
+	rows.Close()
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating transactions: %w", err)
+	}
+
+	if len(txIDs) > 0 {
+		updateQuery := `
+			UPDATE saga_transactions
+			SET locked_by = $1, locked_until = $2, updated_at = NOW()
+			WHERE id = ANY($3)
+		`
+		_, err = dbTx.ExecContext(ctx, updateQuery, instanceID, lockedUntil, pq.Array(txIDs))
+		if err != nil {
+			return nil, fmt.Errorf("failed to claim timed out transactions: %w", err)
+		}
+	}
+
+	if err := dbTx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit: %w", err)
 	}
 
 	return txs, nil
@@ -876,6 +947,78 @@ func (s *PostgresStore) ReleasePollTask(ctx context.Context, stepID string) erro
 		return fmt.Errorf("failed to release poll task: %w", err)
 	}
 	return nil
+}
+
+// ClaimTransaction attempts to acquire a distributed lock on a transaction.
+// Only succeeds when the transaction is not locked or the lock has expired.
+// The same instance can re-claim (reentrant) to support lease renewal.
+// Returns (true, nil) when the lock is successfully acquired.
+func (s *PostgresStore) ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool, error) {
+	lockedUntil := time.Now().Add(leaseDuration)
+
+	query := `
+		UPDATE saga_transactions
+		SET locked_by = $2, locked_until = $3, updated_at = NOW()
+		WHERE id = $1
+		  AND status IN ('pending', 'running', 'compensating')
+		  AND (locked_by IS NULL OR locked_until < NOW() OR locked_by = $2)
+	`
+	result, err := s.db.ExecContext(ctx, query, txID, instanceID, lockedUntil)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim transaction: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
+}
+
+// ReleaseTransaction releases the distributed lock on a transaction.
+// Only releases the lock if it is held by the specified instance, preventing
+// accidental release of another instance's lock.
+func (s *PostgresStore) ReleaseTransaction(ctx context.Context, txID string, instanceID string) error {
+	query := `
+		UPDATE saga_transactions
+		SET locked_by = NULL, locked_until = NULL, updated_at = NOW()
+		WHERE id = $1 AND locked_by = $2
+	`
+	_, err := s.db.ExecContext(ctx, query, txID, instanceID)
+	if err != nil {
+		return fmt.Errorf("failed to release transaction: %w", err)
+	}
+	return nil
+}
+
+// UpdateTransactionStatusCAS updates a transaction status using Compare-And-Swap semantics.
+// The update only succeeds when the current status matches expectedStatus, preventing
+// concurrent overwrites by multiple instances.
+// Returns (true, nil) when the update is successful.
+func (s *PostgresStore) UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus, lastError string) (bool, error) {
+	var finishedAt interface{}
+	if newStatus == TxStatusSucceeded || newStatus == TxStatusFailed {
+		now := time.Now()
+		finishedAt = now
+	}
+
+	query := `
+		UPDATE saga_transactions
+		SET status = $3, last_error = $4, updated_at = NOW(), finished_at = $5
+		WHERE id = $1 AND status = $2
+	`
+	result, err := s.db.ExecContext(ctx, query, txID, string(expectedStatus), string(newStatus), lastError, finishedAt)
+	if err != nil {
+		return false, fmt.Errorf("failed to CAS update transaction status: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	return rowsAffected > 0, nil
 }
 
 // DB returns the underlying database connection for use in transactions.

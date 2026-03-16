@@ -21,6 +21,10 @@ type CoordinatorConfig struct {
 	TimeoutScanInterval time.Duration
 	// AsyncStepTimeout is the timeout for waiting on async step completion (default: 10 minutes).
 	AsyncStepTimeout time.Duration
+	// InstanceID is the unique identifier for this instance (for distributed locking).
+	InstanceID string
+	// LeaseDuration is the duration of the distributed lock lease (default: 5 minutes).
+	LeaseDuration time.Duration
 }
 
 // DefaultCoordinatorConfig returns the default coordinator configuration.
@@ -30,6 +34,8 @@ func DefaultCoordinatorConfig() *CoordinatorConfig {
 		ScanInterval:        5 * time.Second,
 		TimeoutScanInterval: 30 * time.Second,
 		AsyncStepTimeout:    10 * time.Minute,
+		InstanceID:          "",
+		LeaseDuration:       5 * time.Minute,
 	}
 }
 
@@ -130,6 +136,7 @@ func (c *Coordinator) worker(ctx context.Context, id int) {
 }
 
 // recoveryScan performs crash recovery at startup.
+// Uses FOR UPDATE SKIP LOCKED via store to ensure multi-instance safety.
 func (c *Coordinator) recoveryScan(ctx context.Context) {
 	defer c.wg.Done()
 
@@ -142,7 +149,7 @@ func (c *Coordinator) recoveryScan(ctx context.Context) {
 	case <-time.After(1 * time.Second):
 	}
 
-	txs, err := c.store.ListRecoverableTransactions(ctx)
+	txs, err := c.store.ListRecoverableTransactions(ctx, c.config.InstanceID, 100, c.config.LeaseDuration)
 	if err != nil {
 		fmt.Printf("failed to list recoverable transactions: %v\n", err)
 		return
@@ -162,7 +169,7 @@ func (c *Coordinator) recoveryScan(ctx context.Context) {
 		}
 	}
 
-	fmt.Printf("recovery scan complete: found %d, queued %d transactions for recovery\n", len(txs), queued)
+	fmt.Printf("recovery scan complete: found %d, queued %d transactions\n", len(txs), queued)
 }
 
 // timeoutScanner periodically scans for timed-out transactions.
@@ -185,24 +192,29 @@ func (c *Coordinator) timeoutScanner(ctx context.Context) {
 }
 
 // scanTimeouts scans for and handles timed-out transactions.
+// Uses FOR UPDATE SKIP LOCKED via store and CAS status updates for multi-instance safety.
 func (c *Coordinator) scanTimeouts(ctx context.Context) {
-	txs, err := c.store.ListTimedOutTransactions(ctx)
+	txs, err := c.store.ListTimedOutTransactions(ctx, c.config.InstanceID, c.config.LeaseDuration)
 	if err != nil {
 		fmt.Printf("failed to list timed out transactions: %v\n", err)
 		return
 	}
 
 	for _, tx := range txs {
-		// Update status to compensating and queue for processing
-		if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusCompensating, "transaction timeout"); err != nil {
-			fmt.Printf("failed to update transaction %s to compensating: %v\n", tx.ID, err)
+		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, tx.Status, TxStatusCompensating, "transaction timeout")
+		if err != nil {
+			fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
 			continue
 		}
-		c.Submit(tx.ID)
+		if ok {
+			c.Submit(tx.ID)
+		}
 	}
 }
 
 // driveTransaction drives a single transaction through its state machine.
+// Uses distributed locking (ClaimTransaction/ReleaseTransaction) to ensure
+// only one instance processes a given transaction at a time.
 func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 	// Mark transaction as inactive when done
 	defer func() {
@@ -210,6 +222,19 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 		delete(c.activeTx, txID)
 		c.activeTxMu.Unlock()
 	}()
+
+	// Distributed claim: only one instance can drive this transaction
+	claimed, err := c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
+	if err != nil {
+		fmt.Printf("failed to claim transaction %s: %v\n", txID, err)
+		return
+	}
+	if !claimed {
+		// Another instance is processing this transaction
+		return
+	}
+	// Release lock when done
+	defer c.store.ReleaseTransaction(ctx, txID, c.config.InstanceID)
 
 	for {
 		select {
@@ -238,12 +263,21 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 			return
 		}
 
+		// Renew lease to prevent expiration during long-running steps
+		renewed, err := c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
+		if err != nil || !renewed {
+			// Lost the lock, another instance may have taken over
+			fmt.Printf("failed to renew lease for transaction %s, stopping\n", txID)
+			return
+		}
+
 		// Drive based on current status
 		switch tx.Status {
 		case TxStatusPending:
-			// Start transaction
-			if err := c.store.UpdateTransactionStatus(ctx, txID, TxStatusRunning, ""); err != nil {
-				fmt.Printf("failed to update transaction %s to running: %v\n", txID, err)
+			// Use CAS to prevent concurrent status change
+			ok, err := c.store.UpdateTransactionStatusCAS(ctx, txID, TxStatusPending, TxStatusRunning, "")
+			if err != nil || !ok {
+				// CAS failed, another instance already transitioned
 				return
 			}
 			continue
@@ -298,10 +332,14 @@ func (c *Coordinator) executeNextStep(ctx context.Context, tx *Transaction, step
 		}
 	}
 
-	// All steps succeeded
+	// All steps succeeded - use CAS to prevent concurrent status overwrites
 	if allSucceeded {
-		if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusSucceeded, ""); err != nil {
-			fmt.Printf("failed to update transaction %s to succeeded: %v\n", tx.ID, err)
+		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusSucceeded, "")
+		if err != nil {
+			fmt.Printf("failed to CAS update transaction %s to succeeded: %v\n", tx.ID, err)
+		}
+		if !ok {
+			fmt.Printf("transaction %s status already changed, skip marking succeeded\n", tx.ID)
 		}
 		return false
 	}
@@ -429,10 +467,15 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	return false
 }
 
-// triggerCompensation initiates the compensation process.
+// triggerCompensation initiates the compensation process using CAS to prevent
+// concurrent status overwrites by multiple instances.
 func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, reason string) {
-	if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusCompensating, reason); err != nil {
-		fmt.Printf("failed to update transaction %s to compensating: %v\n", tx.ID, err)
+	ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusCompensating, reason)
+	if err != nil {
+		fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
+	}
+	if !ok {
+		fmt.Printf("transaction %s status already changed, skip compensation trigger\n", tx.ID)
 	}
 }
 

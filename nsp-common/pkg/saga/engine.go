@@ -160,6 +160,8 @@ func NewEngine(cfg *Config) (*Engine, error) {
 		ScanInterval:        cfg.CoordScanInterval,
 		TimeoutScanInterval: 30 * time.Second,
 		AsyncStepTimeout:    10 * time.Minute,
+		InstanceID:          cfg.InstanceID,
+		LeaseDuration:       5 * time.Minute,
 	}
 	coordinator := NewCoordinator(store, executor, poller, coordCfg)
 
