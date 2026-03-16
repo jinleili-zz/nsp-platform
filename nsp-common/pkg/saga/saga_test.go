@@ -861,6 +861,10 @@ func (s *mockStore) CreateTransaction(ctx context.Context, tx *Transaction) erro
 	return nil
 }
 
+func (s *mockStore) CreateTransactionWithSteps(ctx context.Context, tx *Transaction, steps []*Step) error {
+	return nil
+}
+
 func (s *mockStore) GetTransaction(ctx context.Context, id string) (*Transaction, error) {
 	return nil, nil
 }
@@ -909,11 +913,11 @@ func (s *mockStore) DeletePollTask(ctx context.Context, stepID string) error {
 	return nil
 }
 
-func (s *mockStore) ListRecoverableTransactions(ctx context.Context) ([]*Transaction, error) {
+func (s *mockStore) ListRecoverableTransactions(ctx context.Context, instanceID string, batchSize int, leaseDuration time.Duration) ([]*Transaction, error) {
 	return nil, nil
 }
 
-func (s *mockStore) ListTimedOutTransactions(ctx context.Context) ([]*Transaction, error) {
+func (s *mockStore) ListTimedOutTransactions(ctx context.Context, instanceID string, leaseDuration time.Duration) ([]*Transaction, error) {
 	return nil, nil
 }
 
@@ -923,4 +927,16 @@ func (s *mockStore) AcquirePollTasks(ctx context.Context, instanceID string, bat
 
 func (s *mockStore) ReleasePollTask(ctx context.Context, stepID string) error {
 	return nil
+}
+
+func (s *mockStore) ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (s *mockStore) ReleaseTransaction(ctx context.Context, txID string, instanceID string) error {
+	return nil
+}
+
+func (s *mockStore) UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus, lastError string) (bool, error) {
+	return true, nil
 }
