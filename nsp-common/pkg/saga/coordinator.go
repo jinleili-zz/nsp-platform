@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -56,9 +57,15 @@ type Coordinator struct {
 }
 
 // NewCoordinator creates a new Coordinator with the given dependencies.
+// If cfg.InstanceID is empty, it generates one from hostname and PID.
 func NewCoordinator(store Store, executor *Executor, poller *Poller, cfg *CoordinatorConfig) *Coordinator {
 	if cfg == nil {
 		cfg = DefaultCoordinatorConfig()
+	}
+
+	if cfg.InstanceID == "" {
+		hostname, _ := os.Hostname()
+		cfg.InstanceID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
 	}
 
 	return &Coordinator{
@@ -137,6 +144,7 @@ func (c *Coordinator) worker(ctx context.Context, id int) {
 
 // recoveryScan performs crash recovery at startup.
 // Uses FOR UPDATE SKIP LOCKED via store to ensure multi-instance safety.
+// Releases locks for any transactions that cannot be submitted to the worker queue.
 func (c *Coordinator) recoveryScan(ctx context.Context) {
 	defer c.wg.Done()
 
@@ -156,15 +164,25 @@ func (c *Coordinator) recoveryScan(ctx context.Context) {
 	}
 
 	queued := 0
-	for _, tx := range txs {
+	for i, tx := range txs {
 		select {
 		case <-ctx.Done():
+			// Release locks for all remaining transactions
+			for _, remaining := range txs[i:] {
+				c.store.ReleaseTransaction(ctx, remaining.ID, c.config.InstanceID)
+			}
 			return
 		case <-c.stopCh:
+			for _, remaining := range txs[i:] {
+				c.store.ReleaseTransaction(ctx, remaining.ID, c.config.InstanceID)
+			}
 			return
 		default:
 			if c.Submit(tx.ID) {
 				queued++
+			} else {
+				// Queue full or already active, release the lock
+				c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
 			}
 		}
 	}
@@ -193,6 +211,7 @@ func (c *Coordinator) timeoutScanner(ctx context.Context) {
 
 // scanTimeouts scans for and handles timed-out transactions.
 // Uses FOR UPDATE SKIP LOCKED via store and CAS status updates for multi-instance safety.
+// Releases locks for transactions that cannot be submitted to the worker queue.
 func (c *Coordinator) scanTimeouts(ctx context.Context) {
 	txs, err := c.store.ListTimedOutTransactions(ctx, c.config.InstanceID, c.config.LeaseDuration)
 	if err != nil {
@@ -204,10 +223,17 @@ func (c *Coordinator) scanTimeouts(ctx context.Context) {
 		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, tx.Status, TxStatusCompensating, "transaction timeout")
 		if err != nil {
 			fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
+			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
 			continue
 		}
-		if ok {
-			c.Submit(tx.ID)
+		if !ok {
+			// CAS failed, another instance already handled this
+			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
+			continue
+		}
+		if !c.Submit(tx.ID) {
+			// Queue full, release the lock so other instances can pick it up
+			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
 		}
 	}
 }
