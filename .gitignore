@@ -10,7 +10,9 @@
 /dist/
 
 # Demo binaries
-nsp-demo/lock-demo
+examples/lock-demo/lock-demo
+examples/server/server
+examples/testclient/testclient
 
 # Test binary
 *.test

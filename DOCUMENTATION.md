@@ -13,17 +13,19 @@ NSP (Network Service Platform) 是一个基于 Go 语言构建的微服务平台
 ## 目录结构
 
 ```
-nsp_platform/
-├── nsp-common/                 # 公共基础库
-│   └── pkg/
-│       ├── auth/               # AK/SK 认证
-│       ├── trace/              # 分布式链路追踪
-│       ├── saga/               # SAGA 分布式事务
-│       ├── logger/             # 统一日志
-│       └── taskqueue/          # 任务队列编排
-└── nsp-demo/                   # 示例服务
-    ├── cmd/server/             # HTTP 服务入口
-    └── internal/               # 内部实现
+nsp-platform/
+├── auth/               # AK/SK 认证
+├── trace/              # 分布式链路追踪
+├── saga/               # SAGA 分布式事务
+├── logger/             # 统一日志
+├── taskqueue/          # 任务队列编排
+├── lock/               # 分布式锁
+├── config/             # 配置管理
+├── docs/               # 文档
+│   └── reviews/        # 代码评审记录
+└── examples/           # 示例代码
+    ├── server/         # HTTP 服务入口
+    └── internal/       # 内部实现
 ```
 
 ---
