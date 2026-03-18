@@ -1,6 +1,7 @@
 // TaskQueue Broker Demo - Producer
 // This example demonstrates the producer side of a custom task queue implementation.
-// The producer submits tasks to PostgreSQL and publishes messages to the broker.
+// The producer submits tasks to PostgreSQL, publishes messages to the broker,
+// and handles callbacks to update task status.
 //
 // Usage:
 //   go run ./cmd/producer
@@ -104,6 +105,73 @@ func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload st
 	return taskID, nil
 }
 
+// HandleCallback processes callback from worker (updates task status)
+func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.CallbackPayload) error {
+	tc := trace.MustTraceFromContext(ctx)
+	log.Printf("[Producer] Callback received: task_id=%s, status=%s | trace_id=%s",
+		cb.TaskID, cb.Status, tc.TraceID)
+
+	task, err := m.store.GetByID(ctx, cb.TaskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task not found: %s", cb.TaskID)
+	}
+
+	switch cb.Status {
+	case "completed":
+		resultJSON, _ := json.Marshal(cb.Result)
+		return m.store.UpdateResult(ctx, cb.TaskID, store.TaskStatusCompleted, string(resultJSON))
+
+	case "failed":
+		// Check if we should retry
+		if task.RetryCount < task.MaxRetries {
+			// Increment retry and re-enqueue
+			m.store.IncrementRetry(ctx, cb.TaskID)
+			m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusPending, cb.ErrorMessage)
+
+			// Re-publish to broker for retry
+			taskPayload := map[string]interface{}{
+				"task_id":   task.ID,
+				"task_name": task.Name,
+				"payload":   task.Payload,
+			}
+			payloadData, _ := json.Marshal(taskPayload)
+
+			asynqTask := &taskqueue.Task{
+				Type:    task.Type,
+				Payload: payloadData,
+				Queue:   store.TaskQueue,
+			}
+
+			// 重试时保留 trace metadata
+			metadata := trace.MetadataFromContext(ctx)
+			if metadata != nil {
+				asynqTask.Metadata = metadata
+			}
+
+			info, err := m.broker.Publish(ctx, asynqTask)
+			if err != nil {
+				m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusFailed, err.Error())
+				return fmt.Errorf("failed to re-publish task: %w", err)
+			}
+
+			m.store.UpdateBrokerTaskID(ctx, cb.TaskID, info.BrokerTaskID)
+			m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusRunning, "")
+			log.Printf("[Producer] Task re-queued for retry: id=%s, retry=%d/%d | trace_id=%s",
+				cb.TaskID, task.RetryCount+1, task.MaxRetries, tc.TraceID)
+			return nil
+		}
+
+		// No more retries
+		return m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusFailed, cb.ErrorMessage)
+
+	default:
+		return fmt.Errorf("unknown callback status: %s", cb.Status)
+	}
+}
+
 // QueryTask returns task status
 func (m *TaskManager) QueryTask(ctx context.Context, taskID string) (*store.Task, error) {
 	return m.store.GetByID(ctx, taskID)
@@ -184,7 +252,36 @@ func main() {
 	manager := NewTaskManager(taskStore, broker)
 
 	// ========================================
-	// Step 4: Submit Tasks
+	// Step 4: Setup Callback Consumer
+	// ========================================
+	callbackConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 2,
+		Queues:      map[string]int{store.CallbackQueue: 10},
+	})
+
+	callbackConsumer.HandleRaw("broker_task_callback", func(ctx context.Context, t *asynq.Task) error {
+		var cb taskqueue.CallbackPayload
+		if err := json.Unmarshal(t.Payload(), &cb); err != nil {
+			return fmt.Errorf("failed to unmarshal callback: %w", err)
+		}
+
+		// 从 context 中提取 TraceContext
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Producer] Processing callback for task_id=%s | trace_id=%s | status=%s",
+			cb.TaskID, tc.TraceID, cb.Status)
+
+		return manager.HandleCallback(ctx, &cb)
+	})
+
+	// Start callback consumer
+	go callbackConsumer.Start(ctx)
+	log.Println("[Producer] Callback consumer started")
+
+	// Wait for consumer to be ready
+	time.Sleep(1 * time.Second)
+
+	// ========================================
+	// Step 5: Submit Tasks
 	// ========================================
 	log.Println("========================================")
 	log.Println("[Producer] Submitting tasks...")
@@ -224,7 +321,7 @@ func main() {
 	}
 
 	// ========================================
-	// Step 5: Poll for Completion
+	// Step 6: Poll for Completion
 	// ========================================
 	log.Println("[Producer] Polling task status...")
 
@@ -262,7 +359,7 @@ func main() {
 	}
 
 	// ========================================
-	// Step 6: Graceful Shutdown
+	// Step 7: Graceful Shutdown
 	// ========================================
 	log.Println("[Producer] Press Ctrl+C to exit...")
 	quit := make(chan os.Signal, 1)
@@ -275,6 +372,7 @@ func main() {
 		log.Println("[Producer] Auto-exit after 10 seconds")
 	}
 
+	callbackConsumer.Stop()
 	cancel()
 	log.Println("[Producer] Done.")
 }
