@@ -44,17 +44,23 @@ import (
 
 func main() {
     // 初始化日志
-    log := logger.NewZapLogger(&logger.Config{
-        Level:  "info",
-        Format: "json",
-    })
+    if err := logger.Init(&logger.Config{
+        ServiceName: "my-service",
+        Level:       logger.LevelInfo,
+        Format:      logger.FormatJSON,
+    }); err != nil {
+        panic(err)
+    }
 
     // 使用 SAGA 分布式事务
-    engine, err := saga.NewEngine(store)
+    engine, err := saga.NewEngine(&saga.Config{
+        DSN: "postgres://user:pass@localhost:5432/mydb",
+    })
     if err != nil {
-        log.Error("failed to create saga engine", "error", err)
+        logger.Error("failed to create saga engine", "error", err)
         return
     }
+    defer engine.Close()
 
     // ...
 }
