@@ -1,0 +1,802 @@
+# SAGA 模块多副本并发安全改造方案
+
+## 1. 背景与问题
+
+当前 SAGA 模块（nsp-common/pkg/saga/）部署为单副本时工作正常，但当 TOP-NSP 水平扩展为多副本时，Coordinator
+层存在事务被多副本重复驱动的风险。
+
+### 1.1 现状：哪些是安全的
+
+Poller 层已具备多副本安全性。 AcquirePollTasks（store.go:801-865）使用了 FOR UPDATE SKIP LOCKED：
+
+```sql
+SELECT id, step_id, transaction_id, next_poll_at
+FROM saga_poll_tasks
+WHERE next_poll_at <= NOW()
+  AND (locked_until IS NULL OR locked_until < NOW())
+ORDER BY next_poll_at
+LIMIT $1
+FOR UPDATE SKIP LOCKED
+```
+
+配合 locked_by / locked_until 字段，多副本的 Poller 不会重复处理同一个 poll task。
+
+### 1.2 现状：哪些有问题
+
+Coordinator 层存在 4 个并发安全缺陷：
+
+**缺陷 1：recoveryScan 无分布式互斥（coordinator.go:133-166）**
+
+```go
+func (c *Coordinator) recoveryScan(ctx context.Context) {
+    txs, err := c.store.ListRecoverableTransactions(ctx)
+    for _, tx := range txs {
+        c.Submit(tx.ID)  // 所有副本都会把相同事务提交到自己的 taskQueue
+    }
+}
+```
+
+ListRecoverableTransactions（store.go:690-741）查询 status IN ('pending', 'running', 'compensating')，无锁、无 claim。3
+个副本同时启动时，同一事务被 3 个副本同时捞取并驱动。
+
+**缺陷 2：driveTransaction 无分布式互斥（coordinator.go:206-269）**
+
+```go
+func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
+    defer func() {
+        c.activeTxMu.Lock()
+        delete(c.activeTx, txID)  // activeTx 只是进程内 map，跨副本无效
+        c.activeTxMu.Unlock()
+    }()
+    // ... 直接读取并执行，无任何分布式锁
+}
+```
+
+activeTx（coordinator.go:48-49）是内存 map，只防同进程内重复，跨副本完全无效。
+
+**缺陷 3：UpdateTransactionStatus 无 CAS 保护（store.go:229-255）**
+
+```sql
+UPDATE saga_transactions
+SET status = $2, last_error = $3, updated_at = NOW(), finished_at = $4
+WHERE id = $1
+-- 缺少: AND status = $expected_status
+```
+
+两个副本可以同时将事务从 running 转到不同目标状态，状态机被破坏。
+
+**缺陷 4：scanTimeouts 无锁（coordinator.go:188-203）**
+
+```go
+func (c *Coordinator) scanTimeouts(ctx context.Context) {
+    txs, err := c.store.ListTimedOutTransactions(ctx)
+    for _, tx := range txs {
+        c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusCompensating, "timeout")
+        c.Submit(tx.ID)  // 多副本同时触发补偿
+    }
+}
+```
+
+### 1.3 风险影响
+
+| 场景 | 后果 | 严重度 |
+|------|------|--------|
+| 同一 Step 被两个副本同时执行 | AZ-NSP 收到重复创建请求，可能创建重复 VRF/VLAN/FW Zone | 高 |
+| 状态被并发覆写 | 副本 A 标记 succeeded，副本 B 还在旧状态继续执行 | 高 |
+| 补偿被重复触发 | 多次删除请求（通常幂等，但浪费资源） | 中 |
+
+---
+
+## 2. 改造方案
+
+核心思路：在 Coordinator 层复用 Poller 层已验证的 locked_by + locked_until + FOR UPDATE SKIP LOCKED 模式。
+
+### 2.1 数据库 Schema 变更
+
+文件：migrations/saga.sql
+
+在 saga_transactions 表新增 2 个字段：
+
+```sql
+-- 在 saga_transactions 表末尾添加两个列
+ALTER TABLE saga_transactions
+    ADD COLUMN IF NOT EXISTS locked_by    VARCHAR(128),
+    ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+
+COMMENT ON COLUMN saga_transactions.locked_by IS '持有锁的实例 ID (hostname-pid)';
+COMMENT ON COLUMN saga_transactions.locked_until IS '锁过期时间，超过此时间其他副本可抢占';
+
+-- 为 recoveryScan 和 timeoutScanner 添加索引
+CREATE INDEX IF NOT EXISTS idx_saga_tx_lock ON saga_transactions(locked_until)
+    WHERE status IN ('pending', 'running', 'compensating');
+```
+
+### 2.2 Store 接口变更
+
+文件：store.go
+
+在 Store 接口中新增 3 个方法：
+
+```go
+// Store 接口新增（在 "Recovery operations" 注释块之后添加）
+type Store interface {
+    // ... 保留所有现有方法 ...
+
+    // Distributed coordination operations (新增)
+    ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool, error)
+    ReleaseTransaction(ctx context.Context, txID string, instanceID string) error
+    UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus, lastError string) (bool, error)
+}
+```
+
+### 2.3 Store 实现 -- ClaimTransaction
+
+文件：store.go，在 ReleasePollTask 方法之后添加
+
+```go
+// ClaimTransaction 尝试获取事务的分布式锁。
+// 只有当事务未被锁定或锁已过期时才能成功。
+// 返回 (true, nil) 表示成功获取锁。
+func (s *PostgresStore) ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool,
+error) {
+    lockedUntil := time.Now().Add(leaseDuration)
+
+    query := `
+        UPDATE saga_transactions
+        SET locked_by = $2, locked_until = $3, updated_at = NOW()
+        WHERE id = $1
+          AND (locked_by IS NULL OR locked_until < NOW() OR locked_by = $2)
+    `
+    result, err := s.db.ExecContext(ctx, query, txID, instanceID, lockedUntil)
+    if err != nil {
+        return false, fmt.Errorf("failed to claim transaction: %w", err)
+    }
+
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return false, fmt.Errorf("failed to get rows affected: %w", err)
+    }
+
+    return rowsAffected > 0, nil
+}
+```
+
+关键设计点：
+- `locked_by = $2`：同一副本可重入（进程内重试不会自己把自己锁住）
+- `locked_until < NOW()`：锁过期后自动释放，副本崩溃不会死锁
+- 不使用 FOR UPDATE：单行 UPDATE 本身是原子的，rowsAffected=0 即抢锁失败
+
+### 2.4 Store 实现 -- ReleaseTransaction
+
+```go
+// ReleaseTransaction 释放事务的分布式锁。
+// 只释放由指定实例持有的锁（防止误释放其他副本的锁）。
+func (s *PostgresStore) ReleaseTransaction(ctx context.Context, txID string, instanceID string) error {
+    query := `
+        UPDATE saga_transactions
+        SET locked_by = NULL, locked_until = NULL, updated_at = NOW()
+        WHERE id = $1 AND locked_by = $2
+    `
+    _, err := s.db.ExecContext(ctx, query, txID, instanceID)
+    if err != nil {
+        return fmt.Errorf("failed to release transaction: %w", err)
+    }
+    return nil
+}
+```
+
+### 2.5 Store 实现 -- UpdateTransactionStatusCAS
+
+```go
+// UpdateTransactionStatusCAS 使用 CAS 语义更新事务状态。
+// 只有当前状态等于 expectedStatus 时才更新，防止并发覆写。
+// 返回 (true, nil) 表示更新成功。
+func (s *PostgresStore) UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus,
+lastError string) (bool, error) {
+    var finishedAt interface{}
+    if newStatus == TxStatusSucceeded || newStatus == TxStatusFailed {
+        now := time.Now()
+        finishedAt = now
+    }
+
+    query := `
+        UPDATE saga_transactions
+        SET status = $3, last_error = $4, updated_at = NOW(), finished_at = $5
+        WHERE id = $1 AND status = $2
+    `
+    result, err := s.db.ExecContext(ctx, query, txID, string(expectedStatus), string(newStatus), lastError, finishedAt)
+    if err != nil {
+        return false, fmt.Errorf("failed to CAS update transaction status: %w", err)
+    }
+
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return false, fmt.Errorf("failed to get rows affected: %w", err)
+    }
+
+    return rowsAffected > 0, nil
+}
+```
+
+### 2.6 Store 实现 -- 改造 ListRecoverableTransactions
+
+文件：store.go，替换现有的 ListRecoverableTransactions 方法
+
+将原来的无锁查询改为带 FOR UPDATE SKIP LOCKED 的 claim 式查询：
+
+```go
+// ListRecoverableTransactions 返回需要恢复的事务，同时锁定它们。
+// 使用 FOR UPDATE SKIP LOCKED 确保多副本不会重复捞取。
+func (s *PostgresStore) ListRecoverableTransactions(ctx context.Context, instanceID string, batchSize int, leaseDuration
+time.Duration) ([]*Transaction, error) {
+    lockedUntil := time.Now().Add(leaseDuration)
+
+    dbTx, err := s.db.BeginTx(ctx, nil)
+    if err != nil {
+        return nil, fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    defer dbTx.Rollback()
+
+    // 选取并锁定未被其他副本持有的事务
+    selectQuery := `
+        SELECT id, status, payload, current_step, created_at, updated_at,
+               finished_at, timeout_at, retry_count, last_error
+        FROM saga_transactions
+        WHERE status IN ('pending', 'running', 'compensating')
+          AND (locked_by IS NULL OR locked_until < NOW())
+        ORDER BY created_at
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+    `
+
+    rows, err := dbTx.QueryContext(ctx, selectQuery, batchSize)
+    if err != nil {
+        return nil, fmt.Errorf("failed to query recoverable transactions: %w", err)
+    }
+
+    var txs []*Transaction
+    var txIDs []string
+    for rows.Next() {
+        var tx Transaction
+        var payloadJSON []byte
+        var status string
+        var lastError sql.NullString
+        err := rows.Scan(
+            &tx.ID, &status, &payloadJSON, &tx.CurrentStep,
+            &tx.CreatedAt, &tx.UpdatedAt, &tx.FinishedAt,
+            &tx.TimeoutAt, &tx.RetryCount, &lastError,
+        )
+        if err != nil {
+            rows.Close()
+            return nil, fmt.Errorf("failed to scan transaction: %w", err)
+        }
+        tx.Status = TxStatus(status)
+        tx.LastError = lastError.String
+        if len(payloadJSON) > 0 {
+            json.Unmarshal(payloadJSON, &tx.Payload)
+        }
+        txs = append(txs, &tx)
+        txIDs = append(txIDs, tx.ID)
+    }
+    rows.Close()
+
+    // 批量 claim
+    if len(txIDs) > 0 {
+        updateQuery := `
+            UPDATE saga_transactions
+            SET locked_by = $1, locked_until = $2, updated_at = NOW()
+            WHERE id = ANY($3)
+        `
+        _, err = dbTx.ExecContext(ctx, updateQuery, instanceID, lockedUntil, pq.Array(txIDs))
+        if err != nil {
+            return nil, fmt.Errorf("failed to claim transactions: %w", err)
+        }
+    }
+
+    if err := dbTx.Commit(); err != nil {
+        return nil, fmt.Errorf("failed to commit: %w", err)
+    }
+
+    return txs, nil
+}
+```
+
+注意：此方法签名变更，需要同步更新 Store 接口和 mockStore。
+
+### 2.7 Store 实现 -- 改造 ListTimedOutTransactions
+
+同样的模式，加入 FOR UPDATE SKIP LOCKED：
+
+```go
+// ListTimedOutTransactions 返回已超时的事务并锁定它们。
+func (s *PostgresStore) ListTimedOutTransactions(ctx context.Context, instanceID string, leaseDuration time.Duration) ([]*Transaction, error) {
+    lockedUntil := time.Now().Add(leaseDuration)
+
+    dbTx, err := s.db.BeginTx(ctx, nil)
+    if err != nil {
+        return nil, fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    defer dbTx.Rollback()
+
+    selectQuery := `
+        SELECT id, status, payload, current_step, created_at, updated_at,
+               finished_at, timeout_at, retry_count, last_error
+        FROM saga_transactions
+        WHERE status IN ('running', 'compensating')
+          AND timeout_at IS NOT NULL
+          AND timeout_at < NOW()
+          AND (locked_by IS NULL OR locked_until < NOW())
+        ORDER BY timeout_at
+        LIMIT 50
+        FOR UPDATE SKIP LOCKED
+    `
+
+    rows, err := dbTx.QueryContext(ctx, selectQuery)
+    if err != nil {
+        return nil, fmt.Errorf("failed to query timed out transactions: %w", err)
+    }
+
+    var txs []*Transaction
+    var txIDs []string
+    for rows.Next() {
+        // ... 与 ListRecoverableTransactions 相同的 scan 逻辑 ...
+        var tx Transaction
+        var payloadJSON []byte
+        var status string
+        var lastError sql.NullString
+        err := rows.Scan(
+            &tx.ID, &status, &payloadJSON, &tx.CurrentStep,
+            &tx.CreatedAt, &tx.UpdatedAt, &tx.FinishedAt,
+            &tx.TimeoutAt, &tx.RetryCount, &lastError,
+        )
+        if err != nil {
+            rows.Close()
+            return nil, fmt.Errorf("failed to scan transaction: %w", err)
+        }
+        tx.Status = TxStatus(status)
+        tx.LastError = lastError.String
+        if len(payloadJSON) > 0 {
+            json.Unmarshal(payloadJSON, &tx.Payload)
+        }
+        txs = append(txs, &tx)
+        txIDs = append(txIDs, tx.ID)
+    }
+    rows.Close()
+
+    if len(txIDs) > 0 {
+        updateQuery := `
+            UPDATE saga_transactions
+            SET locked_by = $1, locked_until = $2, updated_at = NOW()
+            WHERE id = ANY($3)
+        `
+        _, err = dbTx.ExecContext(ctx, updateQuery, instanceID, lockedUntil, pq.Array(txIDs))
+        if err != nil {
+            return nil, fmt.Errorf("failed to claim timed out transactions: %w", err)
+        }
+    }
+
+    if err := dbTx.Commit(); err != nil {
+        return nil, fmt.Errorf("failed to commit: %w", err)
+    }
+
+    return txs, nil
+}
+```
+
+---
+
+### 2.8 Coordinator 改造
+
+文件：coordinator.go
+
+#### 2.8.1 Config 新增 InstanceID 和 LeaseDuration
+
+```go
+type CoordinatorConfig struct {
+    WorkerCount         int
+    ScanInterval        time.Duration
+    TimeoutScanInterval time.Duration
+    AsyncStepTimeout    time.Duration
+    InstanceID          string        // 新增：实例唯一标识
+    LeaseDuration       time.Duration // 新增：事务锁租期，默认 5 分钟
+}
+
+func DefaultCoordinatorConfig() *CoordinatorConfig {
+    return &CoordinatorConfig{
+        WorkerCount:         4,
+        ScanInterval:        5 * time.Second,
+        TimeoutScanInterval: 30 * time.Second,
+        AsyncStepTimeout:    10 * time.Minute,
+        InstanceID:          "",             // 由 Engine 传入
+        LeaseDuration:       5 * time.Minute,// 新增
+    }
+}
+```
+
+#### 2.8.2 改造 driveTransaction -- 加入 Claim/Release
+
+将 coordinator.go:206-269 替换为：
+
+```go
+func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
+    // 清理进程内去重标记
+    defer func() {
+        c.activeTxMu.Lock()
+        delete(c.activeTx, txID)
+        c.activeTxMu.Unlock()
+    }()
+
+    // ★ 关键改造：分布式 claim
+    claimed, err := c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
+    if err != nil {
+        fmt.Printf("failed to claim transaction %s: %v\n", txID, err)
+        return
+    }
+    if !claimed {
+        // 其他副本正在处理，直接退出
+        return
+    }
+    // 完成后释放锁
+    defer c.store.ReleaseTransaction(ctx, txID, c.config.InstanceID)
+
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-c.stopCh:
+            return
+        default:
+        }
+
+        tx, err := c.store.GetTransaction(ctx, txID)
+        if err != nil || tx == nil {
+            fmt.Printf("failed to get transaction %s: %v\n", txID, err)
+            return
+        }
+
+        steps, err := c.store.GetSteps(ctx, txID)
+        if err != nil {
+            fmt.Printf("failed to get steps for transaction %s: %v\n", txID, err)
+            return
+        }
+
+        // ★ 续租：长时间运行的事务需要定期续租
+        c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
+
+        switch tx.Status {
+        case TxStatusPending:
+            // ★ 使用 CAS 更新状态
+            ok, err := c.store.UpdateTransactionStatusCAS(ctx, txID, TxStatusPending, TxStatusRunning, "")
+            if err != nil || !ok {
+                // CAS 失败，说明其他副本已经处理
+                return
+            }
+            continue
+
+        case TxStatusRunning:
+            shouldContinue := c.executeNextStep(ctx, tx, steps)
+            if !shouldContinue {
+                return
+            }
+            continue
+
+        case TxStatusCompensating:
+            c.executeCompensation(ctx, tx, steps)
+            return
+
+        case TxStatusSucceeded, TxStatusFailed:
+            return
+        }
+    }
+}
+```
+
+#### 2.8.3 改造 triggerCompensation -- 使用 CAS
+
+将 coordinator.go:433-437 替换为：
+
+```go
+func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, reason string) {
+    // ★ 使用 CAS：只有当前状态是 running 才能转为 compensating
+    ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusCompensating, reason)
+    if err != nil {
+        fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
+    }
+    if !ok {
+        fmt.Printf("transaction %s status already changed, skip compensation trigger\n", tx.ID)
+    }
+}
+```
+
+#### 2.8.4 改造 executeNextStep 中的成功路径 -- 使用 CAS
+
+在 coordinator.go:302-306，将：
+
+```go
+if allSucceeded {
+    if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusSucceeded, ""); err != nil {
+        fmt.Printf("failed to update transaction %s to succeeded: %v\n", tx.ID, err)
+    }
+    return false
+}
+```
+
+替换为：
+
+```go
+if allSucceeded {
+    ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusSucceeded, "")
+    if err != nil {
+        fmt.Printf("failed to CAS update transaction %s to succeeded: %v\n", tx.ID, err)
+    }
+    if !ok {
+        fmt.Printf("transaction %s status already changed, skip marking succeeded\n", tx.ID)
+    }
+    return false
+}
+```
+
+#### 2.8.5 改造 recoveryScan -- 传入 instanceID
+
+将 coordinator.go:133-166 替换为：
+
+```go
+func (c *Coordinator) recoveryScan(ctx context.Context) {
+    defer c.wg.Done()
+
+    select {
+    case <-ctx.Done():
+        return
+    case <-c.stopCh:
+        return
+    case <-time.After(1 * time.Second):
+    }
+
+    // ★ 传入 instanceID，使用 FOR UPDATE SKIP LOCKED
+    txs, err := c.store.ListRecoverableTransactions(ctx, c.config.InstanceID, 100, c.config.LeaseDuration)
+    if err != nil {
+        fmt.Printf("failed to list recoverable transactions: %v\n", err)
+        return
+    }
+
+    queued := 0
+    for _, tx := range txs {
+        select {
+        case <-ctx.Done():
+            return
+        case <-c.stopCh:
+            return
+        default:
+            if c.Submit(tx.ID) {
+                queued++
+            }
+        }
+    }
+
+    fmt.Printf("recovery scan complete: found %d, queued %d transactions\n", len(txs), queued)
+}
+```
+
+#### 2.8.6 改造 scanTimeouts -- 传入 instanceID
+
+将 coordinator.go:188-203 替换为：
+
+```go
+func (c *Coordinator) scanTimeouts(ctx context.Context) {
+    // ★ 传入 instanceID，使用 FOR UPDATE SKIP LOCKED
+    txs, err := c.store.ListTimedOutTransactions(ctx, c.config.InstanceID, c.config.LeaseDuration)
+    if err != nil {
+        fmt.Printf("failed to list timed out transactions: %v\n", err)
+        return
+    }
+
+    for _, tx := range txs {
+        // ★ 使用 CAS 更新状态
+        ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, tx.Status, TxStatusCompensating, "transaction timeout")
+        if err != nil {
+            fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
+            continue
+        }
+        if ok {
+            c.Submit(tx.ID)
+        }
+    }
+}
+```
+
+### 2.9 Engine 改造 -- 传递 InstanceID
+
+文件：engine.go
+
+在 NewEngine 中（engine.go:158-163），将 InstanceID 传入 Coordinator：
+
+```go
+coordCfg := &CoordinatorConfig{
+    WorkerCount:         cfg.WorkerCount,
+    ScanInterval:        cfg.CoordScanInterval,
+    TimeoutScanInterval: 30 * time.Second,
+    AsyncStepTimeout:    10 * time.Minute,
+    InstanceID:          cfg.InstanceID,    // ★ 新增
+    LeaseDuration:       5 * time.Minute,   // ★ 新增
+}
+```
+
+### 2.10 mockStore 更新
+
+文件：saga_test.go
+
+为 mockStore 添加新接口的实现：
+
+```go
+func (s *mockStore) ClaimTransaction(ctx context.Context, txID string, instanceID string, leaseDuration time.Duration) (bool, error) {
+    return true, nil
+}
+
+func (s *mockStore) ReleaseTransaction(ctx context.Context, txID string, instanceID string) error {
+    return nil
+}
+
+func (s *mockStore) UpdateTransactionStatusCAS(ctx context.Context, txID string, expectedStatus TxStatus, newStatus TxStatus, lastError string) (bool, error) {
+    return true, nil
+}
+
+// ListRecoverableTransactions 签名变更
+func (s *mockStore) ListRecoverableTransactions(ctx context.Context, instanceID string, batchSize int, leaseDuration time.Duration) ([]*Transaction, error) {
+    return nil, nil
+}
+
+// ListTimedOutTransactions 签名变更
+func (s *mockStore) ListTimedOutTransactions(ctx context.Context, instanceID string, leaseDuration time.Duration) ([]*Transaction, error) {
+    return nil, nil
+}
+```
+
+---
+
+## 3. 变更文件清单
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| migrations/saga.sql | 追加 | 新增 locked_by, locked_until 字段和索引 |
+| pkg/saga/store.go | 修改 | Store 接口新增 3 方法；PostgresStore 新增 3 实现；改造 ListRecoverableTransactions 和 ListTimedOutTransactions 签名和实现 |
+| pkg/saga/coordinator.go | 修改 | Config 新增 2 字段；driveTransaction 加 Claim/Release；triggerCompensation 和 executeNextStep 用 CAS；recoveryScan 和 scanTimeouts 传入 instanceID |
+| pkg/saga/engine.go | 修改 | 传递 InstanceID 和 LeaseDuration 到 Coordinator |
+| pkg/saga/definition.go | 无变更 | |
+| pkg/saga/executor.go | 无变更 | |
+| pkg/saga/poller.go | 无变更 | |
+| pkg/saga/template.go | 无变更 | |
+| pkg/saga/jsonpath.go | 无变更 | |
+| pkg/saga/saga_test.go | 修改 | mockStore 新增 3 方法实现，2 方法签名变更 |
+
+---
+
+## 4. 改造后的分布式锁时序
+
+```
+副本 A                        PostgreSQL                      副本 B
+  |                              |                              |
+  |--- ClaimTransaction(tx-1) -->|                              |
+  |<-- (claimed=true) -----------|                              |
+  |                              |                              |
+  |                              |<-- ClaimTransaction(tx-1) ---|
+  |                              |--- (claimed=false) --------->|
+  |                              |          (B 直接退出)         |
+  |                              |                              |
+  |--- CAS: pending→running ---->|                              |
+  |<-- (ok=true) ----------------|                              |
+  |                              |                              |
+  |--- ExecuteStep(step-0) ----->|                              |
+  |<-- (success) ----------------|                              |
+  |                              |                              |
+  |--- 续租 ClaimTransaction --->|                              |
+  |<-- (claimed=true) -----------|                              |
+  |                              |                              |
+  |--- ExecuteStep(step-1) ----->|                              |
+  |<-- (success) ----------------|                              |
+  |                              |                              |
+  |--- CAS: running→succeeded -->|                              |
+  |<-- (ok=true) ----------------|                              |
+  |                              |                              |
+  |--- ReleaseTransaction ------>|                              |
+  |<-- (done) -------------------|                              |
+```
+
+---
+
+## 5. 新增测试用例建议
+
+### 5.1 TestClaimTransactionExclusivity
+
+验证两个并发 claim 只有一个成功：
+
+```go
+func TestClaimTransactionExclusivity(t *testing.T) {
+    db := setupTestDB(t)
+    defer db.Close()
+    store := NewPostgresStore(db)
+
+    // 创建一个 pending 事务
+    tx := &Transaction{ID: "tx-claim-test", Status: TxStatusPending, ...}
+    store.CreateTransaction(ctx, tx)
+
+    // 并发 claim
+    claimed1, _ := store.ClaimTransaction(ctx, "tx-claim-test", "instance-A", 5*time.Minute)
+    claimed2, _ := store.ClaimTransaction(ctx, "tx-claim-test", "instance-B", 5*time.Minute)
+
+    // 只有一个成功
+    if claimed1 == claimed2 {
+        t.Error("expected exactly one claim to succeed")
+    }
+}
+```
+
+### 5.2 TestClaimTransactionLeaseExpiry
+
+验证锁过期后可被其他副本抢占：
+
+```go
+func TestClaimTransactionLeaseExpiry(t *testing.T) {
+    // claim with 1s lease
+    store.ClaimTransaction(ctx, "tx-1", "instance-A", 1*time.Second)
+    time.Sleep(2 * time.Second)
+
+    // 过期后 B 可以 claim
+    claimed, _ := store.ClaimTransaction(ctx, "tx-1", "instance-B", 5*time.Minute)
+    assert(claimed == true)
+}
+```
+
+### 5.3 TestUpdateTransactionStatusCAS
+
+验证 CAS 语义：
+
+```go
+func TestUpdateTransactionStatusCAS(t *testing.T) {
+    // 事务状态为 running
+    // CAS running→succeeded 应成功
+    ok1, _ := store.UpdateTransactionStatusCAS(ctx, "tx-1", TxStatusRunning, TxStatusSucceeded, "")
+    assert(ok1 == true)
+
+    // 再次 CAS running→compensating 应失败（状态已经是 succeeded）
+    ok2, _ := store.UpdateTransactionStatusCAS(ctx, "tx-1", TxStatusRunning, TxStatusCompensating, "")
+    assert(ok2 == false)
+}
+```
+
+### 5.4 TestMultiReplicaRecoveryScan
+
+验证多副本启动时不会重复捞取：
+
+```go
+func TestMultiReplicaRecoveryScan(t *testing.T) {
+    // 创建 3 个 pending 事务
+    for i := 0; i < 3; i++ {
+        store.CreateTransaction(ctx, &Transaction{ID: fmt.Sprintf("tx-%d", i), Status: TxStatusPending, ...})
+    }
+
+    // 副本 A 捞取（batch=2）
+    txsA, _ := store.ListRecoverableTransactions(ctx, "instance-A", 2, 5*time.Minute)
+    // 副本 B 捞取（batch=2）
+    txsB, _ := store.ListRecoverableTransactions(ctx, "instance-B", 2, 5*time.Minute)
+
+    // A 和 B 捞到的事务不应重叠
+    idsA := extractIDs(txsA)
+    idsB := extractIDs(txsB)
+    for _, id := range idsA {
+        assert(!contains(idsB, id))
+    }
+    // 合计应为 3
+    assert(len(idsA) + len(idsB) == 3)
+}
+```
+
+---
+
+## 6. 实施注意事项
+
+1. **数据库迁移顺序**：先执行 ALTER TABLE 添加字段，再部署新代码。新字段默认 NULL，旧代码不会受影响。
+2. **LeaseDuration 选取**：默认 5 分钟。应大于单个 Step 的最大执行时间（含网络超时 30s + 重试）。如果 Step 涉及设备配置可能更慢，建议设为 10 分钟。
+3. **续租频率**：当前在 driveTransaction 的每轮循环中续租。如果 Step 执行时间超过 LeaseDuration 的一半，应在 executeStep 内部也加续租。
+4. **向下兼容**：改造后的代码兼容未添加 locked_by / locked_until 字段的旧数据库（locked_by IS NULL 条件始终为真）。但建议统一升级。
+5. **InstanceID 生成**：engine.go:123 已有 hostname-pid 的生成逻辑，无需额外改动。多副本部署时每个 Pod 的 hostname 不同，天然唯一。
+6. **保留原有 UpdateTransactionStatus**：不删除，仅在需要 CAS 保护的路径使用新的 UpdateTransactionStatusCAS。补偿完成后标记 failed 的场景可以继续用原方法（此时事务已被当前副本独占）。
