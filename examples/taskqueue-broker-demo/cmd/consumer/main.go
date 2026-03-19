@@ -110,49 +110,85 @@ func main() {
 	callbackSender := NewCallbackSender(broker, store.CallbackQueue)
 
 	// ========================================
-	// Step 3: Setup Task Consumer
+	// Step 3: Setup Task Consumer with Priority Queues
 	// ========================================
+	// 配置优先级队列：high > middle > low
+	// 数值越大优先级越高，确保高优先级任务先被处理
 	workerConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
 		Concurrency: 5,
-		Queues:      map[string]int{store.TaskQueue: 10},
+		Queues: map[string]int{
+			store.TaskQueueHigh:   30, // 高优先级：权重 30
+			store.TaskQueueMiddle: 20, // 中优先级：权重 20
+			store.TaskQueueLow:    10, // 低优先级：权重 10
+		},
 	})
 
-	// Register task handlers
-	workerConsumer.Handle("send_email", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		// 从 context 中提取 TraceContext（由 broker 传递的 metadata 恢复）
+	// Register task handlers for different priority queues
+	
+	// --- Payment Notification Handler (High Priority) ---
+	workerConsumer.Handle("send_payment_notification", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
 		tc := trace.MustTraceFromContext(ctx)
-		log.Printf("[Consumer] Processing send_email | trace_id=%s | span_id=%s | parent_span_id=%s",
-			tc.TraceID, tc.SpanId, tc.ParentSpanId)
-
-		var params map[string]interface{}
-		json.Unmarshal(payload.Params, &params)
-
-		log.Printf("[Consumer] Sending email to: %v (task_id=%s)", params["email"], payload.TaskID)
-		time.Sleep(500 * time.Millisecond)
-
-		result := map[string]interface{}{
-			"message": "Email sent successfully",
-			"email":   params["email"],
-		}
-
-		// Send callback to producer
-		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
-			return nil, err
-		}
-		log.Printf("[Consumer] Email sent to: %v | trace_id=%s", params["email"], tc.TraceID)
-		return &taskqueue.TaskResult{Data: result}, nil
-	})
-
-	workerConsumer.Handle("create_record", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-		// 从 context 中提取 TraceContext
-		tc := trace.MustTraceFromContext(ctx)
-		log.Printf("[Consumer] Processing create_record | trace_id=%s | span_id=%s",
+		log.Printf("[Consumer] [HIGH] Processing payment notification | trace_id=%s | span_id=%s",
 			tc.TraceID, tc.SpanId)
 
 		var params map[string]interface{}
 		json.Unmarshal(payload.Params, &params)
 
-		log.Printf("[Consumer] Creating record: %v (task_id=%s)", params["record_type"], payload.TaskID)
+		log.Printf("[Consumer] [HIGH] Sending payment notification: %v (task_id=%s)", 
+			params["payment_id"], payload.TaskID)
+		time.Sleep(200 * time.Millisecond) // Fast processing for high priority
+
+		result := map[string]interface{}{
+			"message":    "Payment notification sent",
+			"payment_id": params["payment_id"],
+		}
+
+		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
+			return nil, err
+		}
+		log.Printf("[Consumer] [HIGH] Payment notification sent: %v | trace_id=%s", 
+			params["payment_id"], tc.TraceID)
+		return &taskqueue.TaskResult{Data: result}, nil
+	})
+
+	// --- Inventory Deduction Handler (High Priority) ---
+	workerConsumer.Handle("deduct_inventory", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [HIGH] Processing inventory deduction | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
+		var params map[string]interface{}
+		json.Unmarshal(payload.Params, &params)
+
+		log.Printf("[Consumer] [HIGH] Deducting inventory: SKU=%v, count=%v (task_id=%s)", 
+			params["sku_id"], params["count"], payload.TaskID)
+		time.Sleep(150 * time.Millisecond)
+
+		result := map[string]interface{}{
+			"message": "Inventory deducted",
+			"sku_id":  params["sku_id"],
+			"count":   params["count"],
+		}
+
+		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
+			return nil, err
+		}
+		log.Printf("[Consumer] [HIGH] Inventory deducted: %v | trace_id=%s", 
+			params["sku_id"], tc.TraceID)
+		return &taskqueue.TaskResult{Data: result}, nil
+	})
+
+	// --- Create Record Handler (Middle Priority) ---
+	workerConsumer.Handle("create_record", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [MIDDLE] Processing create_record | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
+		var params map[string]interface{}
+		json.Unmarshal(payload.Params, &params)
+
+		log.Printf("[Consumer] [MIDDLE] Creating record: %v (task_id=%s)", 
+			params["record_type"], payload.TaskID)
 		time.Sleep(300 * time.Millisecond)
 
 		result := map[string]interface{}{
@@ -160,19 +196,98 @@ func main() {
 			"record_id": "REC-12345",
 		}
 
-		// Send callback to producer
 		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
 			return nil, err
 		}
-		log.Printf("[Consumer] Record created: %v | trace_id=%s", params["record_type"], tc.TraceID)
+		log.Printf("[Consumer] [MIDDLE] Record created: %v | trace_id=%s", 
+			params["record_type"], tc.TraceID)
 		return &taskqueue.TaskResult{Data: result}, nil
 	})
 
-	// Handler for always_fail task (to test retry logic)
+	// --- Send Email Handler (Middle Priority) ---
+	workerConsumer.Handle("send_email", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [MIDDLE] Processing send_email | trace_id=%s | span_id=%s | parent_span_id=%s",
+			tc.TraceID, tc.SpanId, tc.ParentSpanId)
+
+		var params map[string]interface{}
+		json.Unmarshal(payload.Params, &params)
+
+		log.Printf("[Consumer] [MIDDLE] Sending email to: %v (task_id=%s)", 
+			params["email"], payload.TaskID)
+		time.Sleep(500 * time.Millisecond)
+
+		result := map[string]interface{}{
+			"message": "Email sent successfully",
+			"email":   params["email"],
+		}
+
+		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
+			return nil, err
+		}
+		log.Printf("[Consumer] [MIDDLE] Email sent to: %v | trace_id=%s", 
+			params["email"], tc.TraceID)
+		return &taskqueue.TaskResult{Data: result}, nil
+	})
+
+	// --- Generate Report Handler (Low Priority) ---
+	workerConsumer.Handle("generate_report", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [LOW] Processing generate_report | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
+		var params map[string]interface{}
+		json.Unmarshal(payload.Params, &params)
+
+		log.Printf("[Consumer] [LOW] Generating report: %v for date %v (task_id=%s)", 
+			params["report_type"], params["date"], payload.TaskID)
+		time.Sleep(800 * time.Millisecond) // Longer processing time
+
+		result := map[string]interface{}{
+			"message":   "Report generated",
+			"report_id": "RPT-67890",
+		}
+
+		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
+			return nil, err
+		}
+		log.Printf("[Consumer] [LOW] Report generated: %v | trace_id=%s", 
+			params["report_type"], tc.TraceID)
+		return &taskqueue.TaskResult{Data: result}, nil
+	})
+
+	// --- Cleanup Data Handler (Low Priority) ---
+	workerConsumer.Handle("cleanup_data", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [LOW] Processing cleanup_data | trace_id=%s | span_id=%s",
+			tc.TraceID, tc.SpanId)
+
+		var params map[string]interface{}
+		json.Unmarshal(payload.Params, &params)
+
+		log.Printf("[Consumer] [LOW] Cleaning up table: %v, days: %v (task_id=%s)", 
+			params["table_name"], params["days"], payload.TaskID)
+		time.Sleep(600 * time.Millisecond)
+
+		result := map[string]interface{}{
+			"message":      "Data cleaned up",
+			"rows_deleted": 1234,
+		}
+
+		if err := callbackSender.Success(ctx, payload.TaskID, result); err != nil {
+			return nil, err
+		}
+		log.Printf("[Consumer] [LOW] Data cleaned up: %v | trace_id=%s", 
+			params["table_name"], tc.TraceID)
+		return &taskqueue.TaskResult{Data: result}, nil
+	})
+
+	// --- Always Fail Handler (for retry testing) ---
 	workerConsumer.Handle("always_fail", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
 		tc := trace.MustTraceFromContext(ctx)
-		log.Printf("[Consumer] Always fail task executed (task_id=%s) | trace_id=%s", payload.TaskID, tc.TraceID)
-		// Send failure callback to producer (will trigger retry)
+		log.Printf("[Consumer] [MIDDLE] Always fail task executed (task_id=%s) | trace_id=%s", 
+			payload.TaskID, tc.TraceID)
+		
 		if err := callbackSender.Fail(ctx, payload.TaskID, "Simulated failure for retry test"); err != nil {
 			return nil, err
 		}
@@ -181,7 +296,10 @@ func main() {
 
 	// Start consumer
 	go workerConsumer.Start(ctx)
-	log.Println("[Consumer] Task consumer started")
+	log.Println("[Consumer] Task consumer started with priority queues:")
+	log.Println("  - High Priority (nsp:taskqueue:high): weight=30")
+	log.Println("  - Middle Priority (nsp:taskqueue:middle): weight=20")
+	log.Println("  - Low Priority (nsp:taskqueue:low): weight=10")
 	log.Println("[Consumer] Waiting for tasks...")
 
 	// ========================================

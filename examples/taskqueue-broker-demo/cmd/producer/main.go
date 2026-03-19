@@ -48,7 +48,13 @@ func NewTaskManager(s *store.TaskStore, b *asynqbroker.Broker) *TaskManager {
 }
 
 // SubmitTask submits a new task: stores to DB + publishes to broker
+// Uses default priority queue (middle)
 func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload string, maxRetries int) (string, error) {
+	return m.SubmitTaskWithPriority(ctx, name, taskType, payload, maxRetries, store.DefaultQueue)
+}
+
+// SubmitTaskWithPriority submits a new task with specified priority queue
+func (m *TaskManager) SubmitTaskWithPriority(ctx context.Context, name, taskType, payload string, maxRetries int, queue string) (string, error) {
 	taskID := uuid.New().String()
 	now := time.Now()
 
@@ -79,7 +85,7 @@ func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload st
 	asynqTask := &taskqueue.Task{
 		Type:    taskType,
 		Payload: payloadData,
-		Queue:   store.TaskQueue,
+		Queue:   queue,
 	}
 
 	// 注入当前 trace context 的 metadata，供 worker 恢复追踪上下文
@@ -100,8 +106,8 @@ func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload st
 	m.store.UpdateBrokerTaskID(ctx, taskID, info.BrokerTaskID)
 	m.store.UpdateStatus(ctx, taskID, store.TaskStatusRunning, "")
 
-	log.Printf("[Producer] Task submitted: id=%s, type=%s, broker_id=%s | trace_id=%s",
-		taskID, taskType, info.BrokerTaskID, getTraceID(ctx))
+	log.Printf("[Producer] Task submitted: id=%s, type=%s, queue=%s, broker_id=%s | trace_id=%s",
+		taskID, taskType, queue, info.BrokerTaskID, getTraceID(ctx))
 	return taskID, nil
 }
 
@@ -131,7 +137,7 @@ func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.Callback
 			m.store.IncrementRetry(ctx, cb.TaskID)
 			m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusPending, cb.ErrorMessage)
 
-			// Re-publish to broker for retry
+			// Re-publish to broker for retry (use same queue as original task)
 			taskPayload := map[string]interface{}{
 				"task_id":   task.ID,
 				"task_name": task.Name,
@@ -142,7 +148,7 @@ func (m *TaskManager) HandleCallback(ctx context.Context, cb *taskqueue.Callback
 			asynqTask := &taskqueue.Task{
 				Type:    task.Type,
 				Payload: payloadData,
-				Queue:   store.TaskQueue,
+				Queue:   store.DefaultQueue, // 重试使用默认队列
 			}
 
 			// 重试时保留 trace metadata
@@ -281,44 +287,101 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	// ========================================
-	// Step 5: Submit Tasks
+	// Step 5: Submit Tasks with Different Priorities
 	// ========================================
 	log.Println("========================================")
-	log.Println("[Producer] Submitting tasks...")
+	log.Println("[Producer] Submitting tasks with different priorities...")
 	log.Println("========================================")
 
-	// Submit task 1: create_record
+	// --- High Priority Tasks (紧急任务) ---
+	log.Println("\n[High Priority] Submitting urgent tasks...")
+	
+	// 高优先级任务 1：支付通知（需要立即处理）
+	paymentParams, _ := json.Marshal(map[string]interface{}{
+		"payment_id": "PAY-001",
+		"amount":     999.00,
+		"user_id":    "U-001",
+	})
+	highTaskID1, err := manager.SubmitTaskWithPriority(ctx, "Payment Notification", "send_payment_notification", string(paymentParams), 3, store.TaskQueueHigh)
+	if err != nil {
+		log.Fatalf("[Producer] Failed to submit high priority task 1: %v", err)
+	}
+	log.Printf("[Producer] High Priority Task 1 submitted: id=%s", highTaskID1)
+
+	// 高优先级任务 2：库存扣减（下单后立即可用）
+	inventoryParams, _ := json.Marshal(map[string]interface{}{
+		"sku_id": "SKU-001",
+		"count":  2,
+	})
+	highTaskID2, err := manager.SubmitTaskWithPriority(ctx, "Deduct Inventory", "deduct_inventory", string(inventoryParams), 3, store.TaskQueueHigh)
+	if err != nil {
+		log.Fatalf("[Producer] Failed to submit high priority task 2: %v", err)
+	}
+	log.Printf("[Producer] High Priority Task 2 submitted: id=%s", highTaskID2)
+
+	// --- Middle Priority Tasks (普通任务) ---
+	log.Println("\n[Middle Priority] Submitting normal tasks...")
+	
+	// 中优先级任务 1：创建用户记录
 	recordParams, _ := json.Marshal(map[string]interface{}{
 		"record_type": "user_registration",
 		"user_id":     "U-001",
 	})
-	taskID1, err := manager.SubmitTask(ctx, "Create User Record", "create_record", string(recordParams), 3)
+	middleTaskID1, err := manager.SubmitTaskWithPriority(ctx, "Create User Record", "create_record", string(recordParams), 3, store.TaskQueueMiddle)
 	if err != nil {
-		log.Fatalf("[Producer] Failed to submit task 1: %v", err)
+		log.Fatalf("[Producer] Failed to submit middle priority task 1: %v", err)
 	}
-	log.Printf("[Producer] Task 1 submitted: id=%s", taskID1)
+	log.Printf("[Producer] Middle Priority Task 1 submitted: id=%s", middleTaskID1)
 
-	// Submit task 2: send_email
+	// 中优先级任务 2：发送欢迎邮件
 	emailParams, _ := json.Marshal(map[string]interface{}{
 		"email":   "user@example.com",
 		"subject": "Welcome!",
 	})
-	taskID2, err := manager.SubmitTask(ctx, "Send Welcome Email", "send_email", string(emailParams), 3)
+	middleTaskID2, err := manager.SubmitTaskWithPriority(ctx, "Send Welcome Email", "send_email", string(emailParams), 3, store.TaskQueueMiddle)
 	if err != nil {
-		log.Fatalf("[Producer] Failed to submit task 2: %v", err)
+		log.Fatalf("[Producer] Failed to submit middle priority task 2: %v", err)
 	}
-	log.Printf("[Producer] Task 2 submitted: id=%s", taskID2)
+	log.Printf("[Producer] Middle Priority Task 2 submitted: id=%s", middleTaskID2)
 
-	// Submit task 3: always_fail (to test retry logic)
+	// --- Low Priority Tasks (低优先级任务) ---
+	log.Println("\n[Low Priority] Submitting background tasks...")
+	
+	// 低优先级任务 1：生成报表
+	reportParams, _ := json.Marshal(map[string]interface{}{
+		"report_type": "daily_sales",
+		"date":        "2024-01-01",
+	})
+	lowTaskID1, err := manager.SubmitTaskWithPriority(ctx, "Generate Daily Report", "generate_report", string(reportParams), 3, store.TaskQueueLow)
+	if err != nil {
+		log.Fatalf("[Producer] Failed to submit low priority task 1: %v", err)
+	}
+	log.Printf("[Producer] Low Priority Task 1 submitted: id=%s", lowTaskID1)
+
+	// 低优先级任务 2：清理过期数据
+	cleanupParams, _ := json.Marshal(map[string]interface{}{
+		"table_name": "temp_logs",
+		"days":       30,
+	})
+	lowTaskID2, err := manager.SubmitTaskWithPriority(ctx, "Cleanup Expired Data", "cleanup_data", string(cleanupParams), 3, store.TaskQueueLow)
+	if err != nil {
+		log.Fatalf("[Producer] Failed to submit low priority task 2: %v", err)
+	}
+	log.Printf("[Producer] Low Priority Task 2 submitted: id=%s", lowTaskID2)
+
+	// --- Retry Test Task (always fail) ---
 	failParams, _ := json.Marshal(map[string]interface{}{
 		"fail": true,
 	})
-	taskID3, err := manager.SubmitTask(ctx, "Failing Task", "always_fail", string(failParams), 2)
+	failTaskID, err := manager.SubmitTaskWithPriority(ctx, "Failing Task", "always_fail", string(failParams), 2, store.TaskQueueMiddle)
 	if err != nil {
 		log.Printf("[Producer] Failed to submit failing task: %v", err)
 	} else {
-		log.Printf("[Producer] Task 3 (failing task) submitted: id=%s", taskID3)
+		log.Printf("[Producer] Retry Test Task submitted: id=%s", failTaskID)
 	}
+
+	log.Println("\n[Producer] All tasks submitted!")
+	log.Println("========================================")
 
 	// ========================================
 	// Step 6: Poll for Completion
@@ -329,19 +392,39 @@ func main() {
 	for i := 0; i < 30; i++ {
 		time.Sleep(1 * time.Second)
 
-		task1, _ := manager.QueryTask(ctx, taskID1)
-		task2, _ := manager.QueryTask(ctx, taskID2)
+		// Check high priority tasks
+		highTask1, _ := manager.QueryTask(ctx, highTaskID1)
+		highTask2, _ := manager.QueryTask(ctx, highTaskID2)
+		
+		// Check middle priority tasks
+		middleTask1, _ := manager.QueryTask(ctx, middleTaskID1)
+		middleTask2, _ := manager.QueryTask(ctx, middleTaskID2)
+		
+		// Check low priority tasks
+		lowTask1, _ := manager.QueryTask(ctx, lowTaskID1)
+		lowTask2, _ := manager.QueryTask(ctx, lowTaskID2)
 
-		log.Printf("[Producer] Task1 (%s): %s", task1.Type, task1.Status)
-		log.Printf("[Producer] Task2 (%s): %s", task2.Type, task2.Status)
+		log.Printf("[Producer] High   - Task1 (%s): %s, Task2 (%s): %s", 
+			highTask1.Type, highTask1.Status, highTask2.Type, highTask2.Status)
+		log.Printf("[Producer] Middle - Task1 (%s): %s, Task2 (%s): %s", 
+			middleTask1.Type, middleTask1.Status, middleTask2.Type, middleTask2.Status)
+		log.Printf("[Producer] Low    - Task1 (%s): %s, Task2 (%s): %s", 
+			lowTask1.Type, lowTask1.Status, lowTask2.Type, lowTask2.Status)
 
-		if task1.Status == store.TaskStatusCompleted && task2.Status == store.TaskStatusCompleted {
+		// Check if all tasks completed
+		if highTask1.Status == store.TaskStatusCompleted && 
+		   highTask2.Status == store.TaskStatusCompleted &&
+		   middleTask1.Status == store.TaskStatusCompleted && 
+		   middleTask2.Status == store.TaskStatusCompleted &&
+		   lowTask1.Status == store.TaskStatusCompleted && 
+		   lowTask2.Status == store.TaskStatusCompleted {
 			allCompleted = true
 			break
 		}
 
-		if task1.Status == store.TaskStatusFailed || task2.Status == store.TaskStatusFailed {
-			log.Printf("[Producer] Task failed!")
+		// Check for failures
+		if highTask1.Status == store.TaskStatusFailed || highTask2.Status == store.TaskStatusFailed {
+			log.Printf("[Producer] High priority task failed!")
 		}
 	}
 
@@ -352,8 +435,8 @@ func main() {
 	}
 
 	// Check failing task status
-	if taskID3 != "" {
-		failTask, _ := manager.QueryTask(ctx, taskID3)
+	if failTaskID != "" {
+		failTask, _ := manager.QueryTask(ctx, failTaskID)
 		log.Printf("[Producer] Failing task final status: %s (retries=%d/%d)",
 			failTask.Status, failTask.RetryCount, failTask.MaxRetries)
 	}

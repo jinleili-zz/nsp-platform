@@ -12,10 +12,19 @@ import (
 )
 
 const (
-	RedisAddr     = "127.0.0.1:6379"
-	PgDSN         = "postgres://admin:admin123@127.0.0.1:5432/taskqueue_broker?sslmode=disable"
-	TaskQueue     = "broker_tasks"
-	CallbackQueue = "broker_callbacks"
+	RedisAddr = "127.0.0.1:6379"
+	PgDSN     = "postgres://admin:admin123@127.0.0.1:5432/taskqueue_broker?sslmode=disable"
+
+	// 任务队列命名：使用冒号分隔，符合 Redis 最佳实践
+	// 格式：{项目}:{模块}:{类型}
+	TaskQueuePrefix    = "nsp:taskqueue"
+	TaskQueueHigh      = "nsp:taskqueue:high"      // 高优先级队列
+	TaskQueueMiddle    = "nsp:taskqueue:middle"    // 中优先级队列
+	TaskQueueLow       = "nsp:taskqueue:low"       // 低优先级队列
+	CallbackQueue      = "nsp:taskqueue:callback"  // 回调队列
+
+	// DefaultQueue 默认队列（向后兼容）
+	DefaultQueue = TaskQueueMiddle
 )
 
 const (
