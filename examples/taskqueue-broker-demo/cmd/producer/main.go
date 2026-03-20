@@ -233,7 +233,7 @@ func main() {
 	// ========================================
 	// Step 1: Setup Broker
 	// ========================================
-	redisOpt := asynq.RedisClientOpt{Addr: store.RedisAddr}
+	redisOpt := asynq.RedisClientOpt{Addr: store.MustRedisAddr()}
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
 	log.Println("[Producer] Broker created")
@@ -241,7 +241,7 @@ func main() {
 	// ========================================
 	// Step 2: Setup Task Store (PostgreSQL)
 	// ========================================
-	taskStore, err := store.NewTaskStore(store.PgDSN)
+	taskStore, err := store.NewTaskStore(store.MustPgDSN())
 	if err != nil {
 		log.Fatalf("[Producer] Failed to connect to database: %v", err)
 	}

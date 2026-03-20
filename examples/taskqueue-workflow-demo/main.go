@@ -28,8 +28,6 @@ import (
 )
 
 const (
-	redisAddr     = "127.0.0.1:6379"
-	pgDSN         = "postgres://admin:admin123@127.0.0.1:5432/taskqueue_workflow?sslmode=disable"
 	callbackQueue = "workflow_callbacks"
 	taskQueue     = "workflow_tasks"
 )
@@ -58,6 +56,26 @@ const (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// Read required env vars
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		log.Fatal("REDIS_ADDR environment variable is required")
+	}
+
+	pgUser := os.Getenv("PG_USER")
+	pgPassword := os.Getenv("PG_PASSWORD")
+	pgHost := os.Getenv("PG_HOST")
+	pgDBName := os.Getenv("PG_DBNAME")
+	for _, v := range []struct{ name, val string }{
+		{"PG_USER", pgUser}, {"PG_PASSWORD", pgPassword},
+		{"PG_HOST", pgHost}, {"PG_DBNAME", pgDBName},
+	} {
+		if v.val == "" {
+			log.Fatalf("%s environment variable is required", v.name)
+		}
+	}
+	pgDSN := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", pgUser, pgPassword, pgHost, pgDBName)
 
 	// 获取实例 ID（用于链路追踪）
 	instanceId := trace.GetInstanceId()

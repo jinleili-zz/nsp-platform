@@ -99,7 +99,7 @@ func main() {
 	// ========================================
 	// Step 1: Setup Broker
 	// ========================================
-	redisOpt := asynq.RedisClientOpt{Addr: store.RedisAddr}
+	redisOpt := asynq.RedisClientOpt{Addr: store.MustRedisAddr()}
 	broker := asynqbroker.NewBroker(redisOpt)
 	defer broker.Close()
 	log.Println("[Consumer] Broker created")

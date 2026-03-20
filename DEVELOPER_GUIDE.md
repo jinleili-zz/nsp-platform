@@ -325,22 +325,34 @@ logger.FieldService      // "service"
 logger.FieldTraceID      // "trace_id"
 logger.FieldSpanID       // "span_id"
 logger.FieldUserID       // "user_id"
+logger.FieldRequestID    // "request_id"
 logger.FieldModule       // "module"
 logger.FieldMethod       // "method"
+logger.FieldPath         // "path"
+logger.FieldCode         // "code"
 logger.FieldError        // "error"
 logger.FieldLatencyMS    // "latency_ms"
+logger.FieldPeerAddr     // "peer_addr"
 
 // 访问日志专用字段
 logger.FieldHTTPMethod   // "http_method"
 logger.FieldHTTPPath     // "http_path"
 logger.FieldHTTPStatus   // "http_status"
 logger.FieldHTTPLatency  // "http_latency_ms"
+logger.FieldHTTPQuery    // "http_query"
 logger.FieldClientIP     // "client_ip"
+logger.FieldUserAgent    // "user_agent"
+logger.FieldRequestSize  // "request_size"
+logger.FieldResponseSize // "response_size"
+logger.FieldReferer      // "referer"
 
 // 平台组件专用字段
 logger.FieldComponent    // "component"
 logger.FieldTaskType     // "task_type"
 logger.FieldTaskID       // "task_id"
+logger.FieldQueue        // "queue"
+logger.FieldWorkerID     // "worker_id"
+logger.FieldRetryCount   // "retry_count"
 logger.FieldWorkflowID   // "workflow_id"
 logger.FieldStepName     // "step_name"
 
@@ -1232,7 +1244,8 @@ type Consumer interface {
 type HandlerFunc func(ctx context.Context, payload *TaskPayload) (*TaskResult, error)
 
 // Engine — 编排侧
-engine, err := taskqueue.NewEngine(cfg, broker)
+engine, err := taskqueue.NewEngine(cfg, broker)             // 自动管理数据库连接
+engine := taskqueue.NewEngineWithStore(cfg, broker, store)  // 外部提供 Store（测试用）
 workflowID, err := engine.SubmitWorkflow(ctx, def)
 err = engine.HandleCallback(ctx, cb)
 resp, err := engine.QueryWorkflow(ctx, workflowID)
@@ -1253,6 +1266,18 @@ sender.Fail(ctx, taskID, errorMsg)
 | `DSN` | `string` | PostgreSQL 连接串，必填 |
 | `CallbackQueue` | `string` | Worker 回调消息的目标队列名 |
 | `QueueRouter` | `QueueRouterFunc` | 自定义队列路由函数，nil 使用默认规则 |
+| `Hooks` | `*WorkflowHooks` | 生命周期钩子，用于在状态变更时同步外部资源 |
+
+**`WorkflowHooks`**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `OnStepComplete` | `func(ctx, workflow, step) error` | 步骤成功后、下一步入队前 |
+| `OnStepFailed` | `func(ctx, workflow, step, errMsg) error` | 步骤重试耗尽、Workflow 失败前 |
+| `OnWorkflowComplete` | `func(ctx, workflow) error` | 所有步骤完成、Workflow 成功后 |
+| `OnWorkflowFailed` | `func(ctx, workflow, errMsg) error` | Workflow 标记失败后 |
+
+> 钩子执行失败仅记日志，不会阻塞状态机。
 
 **优先级常量**
 
@@ -1344,8 +1369,10 @@ callbackConsumer.Handle("task_callback", func(ctx context.Context, payload *task
 | `""` | Normal | `tasks` |
 | `""` | High | `tasks_high` |
 | `""` | Critical | `tasks_critical` |
+| `""` | Low | `tasks_low` |
 | `"huawei"` | Normal | `tasks_huawei` |
 | `"huawei"` | High | `tasks_huawei_high` |
+| `"huawei"` | Low | `tasks_huawei_low` |
 | `"cisco"` | Critical | `tasks_cisco_critical` |
 
 自定义路由：

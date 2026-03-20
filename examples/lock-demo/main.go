@@ -38,7 +38,8 @@ import (
 func main() {
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
-		addr = "localhost:6379"
+		fmt.Fprintln(os.Stderr, "REDIS_ADDR environment variable is required")
+		os.Exit(1)
 	}
 
 	fmt.Println("=== NSP 分布式锁 SDK Demo ===")

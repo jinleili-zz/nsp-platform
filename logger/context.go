@@ -4,7 +4,6 @@ package logger
 
 import (
 	"context"
-	"log/slog"
 )
 
 // contextKey is a private type for context keys to avoid collisions with other packages.
@@ -130,11 +129,11 @@ func extractContextFields(ctx context.Context) []any {
 	var attrs []any
 
 	if traceID := TraceIDFromContext(ctx); traceID != "" {
-		attrs = append(attrs, slog.String(FieldTraceID, traceID))
+		attrs = append(attrs, FieldTraceID, traceID)
 	}
 
 	if spanID := SpanIDFromContext(ctx); spanID != "" {
-		attrs = append(attrs, slog.String(FieldSpanID, spanID))
+		attrs = append(attrs, FieldSpanID, spanID)
 	}
 
 	return attrs
