@@ -26,3 +26,4 @@ examples/testclient/testclient
 # OS files
 .DS_Store
 Thumbs.db
+consumer\nproducer\n
