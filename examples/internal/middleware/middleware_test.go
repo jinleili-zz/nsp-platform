@@ -124,12 +124,12 @@ func TestGinTraceMiddleware(t *testing.T) {
 		})
 
 		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set(trace.HeaderRequestID, "request-id-fallback-12345")
+		req.Header.Set(trace.HeaderRequestID, "abcdef0123456789abcdef0123456789")
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
 
 		traceID := rec.Header().Get(trace.HeaderTraceID)
-		if traceID != "request-id-fallback-12345" {
+		if traceID != "abcdef0123456789abcdef0123456789" {
 			t.Errorf("expected X-Request-Id as trace ID, got %s", traceID)
 		}
 	})

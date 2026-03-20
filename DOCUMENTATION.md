@@ -1015,7 +1015,8 @@ asynq.WithLogger(logger.NewWriterAdapter(nil,
 | 类型/函数 | 说明 |
 |----------|------|
 | `Config` | 引擎配置 |
-| `NewEngine(cfg, broker) (*Engine, error)` | 创建引擎 |
+| `NewEngine(cfg, broker) (*Engine, error)` | 创建引擎（自动管理数据库连接） |
+| `NewEngineWithStore(cfg, broker, store) *Engine` | 创建引擎（外部提供 Store，适用于测试） |
 | `Engine.Migrate(ctx) error` | 执行数据库迁移 |
 | `Engine.SubmitWorkflow(ctx, def) (string, error)` | 提交工作流 |
 | `Engine.HandleCallback(ctx, cb) error` | 处理回调 |
@@ -1023,6 +1024,21 @@ asynq.WithLogger(logger.NewWriterAdapter(nil,
 | `Engine.RetryStep(ctx, stepID) error` | 重试步骤 |
 | `Engine.NewCallbackSender() *CallbackSender` | 创建回调发送器 |
 | `Engine.Stop() error` | 停止引擎 |
+
+#### WorkflowHooks — 生命周期钩子
+
+通过 `Config.Hooks` 注册回调，在工作流/步骤状态变更时同步外部资源（如业务表）：
+
+```go
+type WorkflowHooks struct {
+    OnStepComplete   func(ctx, workflow, step) error           // 步骤成功后、下一步入队前
+    OnStepFailed     func(ctx, workflow, step, errMsg) error   // 步骤重试耗尽、Workflow 标记失败前
+    OnWorkflowComplete func(ctx, workflow) error               // 所有步骤完成、Workflow 标记成功后
+    OnWorkflowFailed   func(ctx, workflow, errMsg) error       // Workflow 标记失败后
+}
+```
+
+> 钩子执行失败仅记日志，不会阻塞工作流状态机。
 
 #### 工作流定义
 
@@ -1089,8 +1105,11 @@ type Broker interface {
 tasks              # 普通优先级，无标签
 tasks_high         # 高优先级
 tasks_critical     # 紧急优先级
+tasks_low          # 低优先级
 tasks_{tag}        # 带标签
-tasks_{tag}_high   # 带标签和优先级
+tasks_{tag}_high   # 带标签和高优先级
+tasks_{tag}_critical # 带标签和紧急优先级
+tasks_{tag}_low    # 带标签和低优先级
 ```
 
 ### 使用示例
@@ -1100,6 +1119,12 @@ tasks_{tag}_high   # 带标签和优先级
 engine, _ := taskqueue.NewEngine(&taskqueue.Config{
     DSN:           "postgres://...",
     CallbackQueue: "task_callbacks",
+    Hooks: &taskqueue.WorkflowHooks{
+        OnStepComplete: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask) error {
+            log.Printf("step %s completed", step.TaskName)
+            return nil
+        },
+    },
 }, asynqBroker)
 
 def := &taskqueue.WorkflowDefinition{
@@ -1171,8 +1196,10 @@ require (
     github.com/gin-gonic/gin v1.10.0
     github.com/google/uuid v1.6.0
     github.com/lib/pq v1.10.9
-    go.uber.org/zap v1.27.0
-    go.uber.org/zap/exp/zapslog v0.2.0
+    github.com/hibiken/asynq v0.26.0
+    github.com/spf13/viper v1.21.0
+    go.uber.org/zap v1.27.1
+    go.uber.org/zap/exp v0.3.0
     gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 ```

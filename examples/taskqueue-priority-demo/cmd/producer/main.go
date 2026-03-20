@@ -167,7 +167,7 @@ func (p *TaskProducer) GetQueueStats() error {
 		fmt.Printf("Queue: %-40s | Pending: %3d | Active: %3d | Completed: %3d | Failed: %3d\n",
 			queue, info.Pending, info.Active, info.Completed, info.Failed)
 	}
-	fmt.Println("======================================\n")
+	fmt.Println("======================================")
 	return nil
 }
 

@@ -161,7 +161,7 @@ func printConsumerInfo(cfg *config.Config) {
 	fmt.Printf("  - %s\n", config.TaskTypeDataExport)
 	fmt.Printf("  - %s\n", config.TaskTypeReportGenerate)
 	fmt.Printf("  - %s\n", config.TaskTypeNotification)
-	fmt.Println("============================================\n")
+	fmt.Println("============================================")
 }
 
 func main() {
