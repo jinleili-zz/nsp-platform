@@ -6,15 +6,41 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	_ "github.com/lib/pq"
 )
 
-const (
-	RedisAddr = "127.0.0.1:6379"
-	PgDSN     = "postgres://admin:admin123@127.0.0.1:5432/taskqueue_broker?sslmode=disable"
+// MustRedisAddr returns the Redis address from the REDIS_ADDR env var, or fatals if unset.
+func MustRedisAddr() string {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		log.Fatal("REDIS_ADDR environment variable is required")
+	}
+	return addr
+}
 
+// MustPgDSN builds a PostgreSQL DSN from PG_USER, PG_PASSWORD, PG_HOST, PG_DBNAME env vars.
+// Fatals if any of them is empty.
+func MustPgDSN() string {
+	user := os.Getenv("PG_USER")
+	password := os.Getenv("PG_PASSWORD")
+	host := os.Getenv("PG_HOST")
+	dbname := os.Getenv("PG_DBNAME")
+	for _, v := range []struct{ name, val string }{
+		{"PG_USER", user}, {"PG_PASSWORD", password},
+		{"PG_HOST", host}, {"PG_DBNAME", dbname},
+	} {
+		if v.val == "" {
+			log.Fatalf("%s environment variable is required", v.name)
+		}
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", user, password, host, dbname)
+}
+
+const (
 	// 任务队列命名：使用冒号分隔，符合 Redis 最佳实践
 	// 格式：{项目}:{模块}:{类型}
 	TaskQueuePrefix    = "nsp:taskqueue"
