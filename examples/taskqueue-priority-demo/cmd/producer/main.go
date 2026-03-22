@@ -25,7 +25,6 @@ import (
 type TaskProducer struct {
 	broker    taskqueue.Broker
 	config    *config.Config
-	client    *asynq.Client
 	inspector *asynq.Inspector
 }
 
@@ -37,22 +36,17 @@ func NewTaskProducer(cfg *config.Config) (*TaskProducer, error) {
 	}
 
 	broker := asynqbroker.NewBroker(redisOpt)
-	client := asynq.NewClient(redisOpt)
 	inspector := asynq.NewInspector(redisOpt)
 
 	return &TaskProducer{
 		broker:    broker,
 		config:    cfg,
-		client:    client,
 		inspector: inspector,
 	}, nil
 }
 
 // Close 关闭生产者
 func (p *TaskProducer) Close() error {
-	if p.client != nil {
-		p.client.Close()
-	}
 	if p.broker != nil {
 		p.broker.Close()
 	}
