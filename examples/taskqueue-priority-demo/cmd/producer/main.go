@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,34 +26,25 @@ import (
 type TaskProducer struct {
 	broker    taskqueue.Broker
 	config    *config.Config
-	client    *asynq.Client
 	inspector *asynq.Inspector
 }
 
 // NewTaskProducer 创建任务生产者
 func NewTaskProducer(cfg *config.Config) (*TaskProducer, error) {
-	redisOpt := asynq.RedisClientOpt{
-		Addr: cfg.RedisAddr,
-		DB:   cfg.RedisDB,
-	}
+	redisOpt := cfg.RedisConnOpt()
 
 	broker := asynqbroker.NewBroker(redisOpt)
-	client := asynq.NewClient(redisOpt)
 	inspector := asynq.NewInspector(redisOpt)
 
 	return &TaskProducer{
 		broker:    broker,
 		config:    cfg,
-		client:    client,
 		inspector: inspector,
 	}, nil
 }
 
 // Close 关闭生产者
 func (p *TaskProducer) Close() error {
-	if p.client != nil {
-		p.client.Close()
-	}
 	if p.broker != nil {
 		p.broker.Close()
 	}
@@ -212,10 +204,7 @@ func CallbackHandler(ctx context.Context, t *asynq.Task) error {
 func startCallbackConsumer(cfg *config.Config, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	redisOpt := asynq.RedisClientOpt{
-		Addr: cfg.RedisAddr,
-		DB:   cfg.RedisDB,
-	}
+	redisOpt := cfg.RedisConnOpt()
 
 	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
 		Concurrency: cfg.CallbackConcurrency,
@@ -301,7 +290,7 @@ func main() {
 
 	// 加载配置
 	cfg := config.DefaultConfig()
-	log.Printf("[Producer] Config: redis=%s, instance_id=%s", cfg.RedisAddr, cfg.InstanceID)
+	log.Printf("[Producer] Config: redis=%s, instance_id=%s", strings.Join(cfg.RedisAddrs, ","), cfg.InstanceID)
 
 	// 创建生产者
 	producer, err := NewTaskProducer(cfg)

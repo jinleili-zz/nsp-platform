@@ -5,7 +5,10 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/hibiken/asynq"
 )
 
 // 队列命名规范（符合 Redis 命名习惯：小写、冒号分隔、语义清晰）
@@ -52,8 +55,9 @@ const (
 // Config 应用配置
 type Config struct {
 	// Redis 配置
-	RedisAddr string
-	RedisDB   int
+	// RedisAddrs 包含一个或多个节点地址；多个地址时使用 Redis Cluster 模式
+	RedisAddrs []string
+	RedisDB    int
 
 	// 消费者配置
 	Concurrency       int           // 任务消费者并发数
@@ -74,8 +78,13 @@ func DefaultConfig() *Config {
 	if redisAddr == "" {
 		log.Fatal("REDIS_ADDR environment variable is required")
 	}
+	// 支持逗号分隔的多节点地址（Cluster 模式），单个地址则为单节点模式
+	addrs := strings.Split(redisAddr, ",")
+	for i := range addrs {
+		addrs[i] = strings.TrimSpace(addrs[i])
+	}
 	return &Config{
-		RedisAddr:           redisAddr,
+		RedisAddrs:          addrs,
 		RedisDB:             0,
 		Concurrency:         DefaultConcurrency,
 		CallbackConcurrency: DefaultCallbackConcurrency,
@@ -84,6 +93,15 @@ func DefaultConfig() *Config {
 		MaxRetry:            DefaultMaxRetry,
 		InstanceID:          getInstanceID(),
 	}
+}
+
+// RedisConnOpt 返回适合当前配置的 asynq Redis 连接选项。
+// 单节点返回 RedisClientOpt，多节点（Cluster）返回 RedisClusterClientOpt。
+func (c *Config) RedisConnOpt() asynq.RedisConnOpt {
+	if len(c.RedisAddrs) == 1 {
+		return asynq.RedisClientOpt{Addr: c.RedisAddrs[0], DB: c.RedisDB}
+	}
+	return asynq.RedisClusterClientOpt{Addrs: c.RedisAddrs}
 }
 
 // GetQueueByPriority 根据优先级获取对应的队列名称
