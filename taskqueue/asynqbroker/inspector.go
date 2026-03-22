@@ -3,6 +3,7 @@ package asynqbroker
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -147,7 +148,14 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 		if err != nil {
 			return nil, wrapQueueErr(err)
 		}
-		aggTasks, _ := i.inner.ListAggregatingTasks(queue, "", asynqOpts...) // ignore aggregating errors
+
+		// 遍历所有组获取 aggregating 任务
+		var aggTasks []*asynq.TaskInfo
+		groups, _ := i.inner.Groups(queue)
+		for _, g := range groups {
+			groupTasks, _ := i.inner.ListAggregatingTasks(queue, g.Group, asynqOpts...)
+			aggTasks = append(aggTasks, groupTasks...)
+		}
 
 		tasks = make([]*taskqueue.TaskDetail, 0, len(pendingTasks)+len(aggTasks))
 		for _, t := range pendingTasks {
@@ -157,10 +165,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 			tasks = append(tasks, convertTaskInfo(t))
 		}
 
-		// 获取 pending 计数
+		// 获取 pending + aggregating 计数
 		info, err := i.inner.GetQueueInfo(queue)
 		if err == nil {
-			total = info.Pending
+			total = info.Pending + info.Aggregating
 		}
 
 	case taskqueue.TaskStateScheduled:
@@ -470,12 +478,12 @@ func convertState(s asynq.TaskState) taskqueue.TaskState {
 
 // isQueueNotFoundErr 检查是否为队列不存在错误。
 func isQueueNotFoundErr(err error) bool {
-	return err == asynq.ErrQueueNotFound
+	return errors.Is(err, asynq.ErrQueueNotFound)
 }
 
 // isTaskNotFoundErr 检查是否为任务不存在错误。
 func isTaskNotFoundErr(err error) bool {
-	return err == asynq.ErrTaskNotFound
+	return errors.Is(err, asynq.ErrTaskNotFound)
 }
 
 // wrapQueueErr 包装队列相关错误。
