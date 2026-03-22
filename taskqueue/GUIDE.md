@@ -19,7 +19,10 @@ TaskQueue 是一个基于消息队列的工作流编排框架，支持：
 │  │            │    │  (Publish)   │    │  (Redis/Kafka/...)  │     │
 │  └────────────┘    └──────────────┘    └─────────────────────┘     │
 │         │                                          │                │
-│         │                                          │                │
+│         │          ┌──────────────┐                │                │
+│         │          │  Inspector   │←───────────────┤                │
+│         │          │  (Monitor)   │                │                │
+│         │          └──────────────┘                │                │
 │         ▼                                          ▼                │
 │  ┌────────────┐                            ┌────────────────┐       │
 │  │ PostgreSQL │                            │ Worker Queues  │       │
@@ -53,6 +56,7 @@ TaskQueue 是一个基于消息队列的工作流编排框架，支持：
 | **QueueTag** | 队列路由标签，用于将任务发送到特定队列 |
 | **Priority** | 任务优先级：Low(1), Normal(3), High(6), Critical(9) |
 | **Callback** | Worker执行完成后向Orchestrator发送的回调 |
+| **Inspector** | 运维监控组件，查询队列统计、任务详情、Worker状态 |
 
 ### 状态流转
 
@@ -375,6 +379,101 @@ firewallConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig
 })
 ```
 
+### 5. Inspector 运维监控
+
+Inspector 是独立于 Engine 的运维监控组件，提供队列统计、任务查询、Worker 状态等功能。
+
+#### 基本使用
+
+```go
+import (
+    "github.com/hibiken/asynq"
+    "github.com/paic/nsp-common/pkg/taskqueue"
+    "github.com/paic/nsp-common/pkg/taskqueue/asynqbroker"
+)
+
+// 创建 Inspector（独立于 Engine）
+redisOpt := asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}
+inspector := asynqbroker.NewInspector(redisOpt)
+defer inspector.Close()
+
+ctx := context.Background()
+
+// 列出所有队列
+queues, _ := inspector.Queues(ctx)
+for _, q := range queues {
+    fmt.Println("Queue:", q)
+}
+
+// 获取队列统计
+stats, _ := inspector.GetQueueStats(ctx, "tasks_high")
+fmt.Printf("Pending: %d, Active: %d, Failed: %d\n",
+    stats.Pending, stats.Active, stats.Failed)
+
+// 查看在线 Worker
+workers, _ := inspector.ListWorkers(ctx)
+for _, w := range workers {
+    fmt.Printf("Worker %s (PID %d): %d active tasks\n",
+        w.Host, w.PID, w.ActiveTasks)
+}
+```
+
+#### 可选能力探测
+
+Inspector 采用分层设计，可选能力通过接口断言探测：
+
+```go
+// 探测 TaskReader 能力（任务级查询）
+if tr, ok := inspector.(taskqueue.TaskReader); ok {
+    // 查询单个任务详情
+    task, _ := tr.GetTaskInfo(ctx, "tasks_high", taskID)
+    fmt.Printf("Task %s: state=%s, retried=%d\n",
+        task.ID, task.State, task.Retried)
+
+    // 分页列出失败任务
+    result, _ := tr.ListTasks(ctx, "tasks_high", taskqueue.TaskStateFailed,
+        &taskqueue.ListOptions{Page: 1, PageSize: 20})
+    for _, t := range result.Tasks {
+        fmt.Printf("Failed task: %s, error: %s\n", t.ID, t.LastError)
+    }
+}
+
+// 探测 TaskController 能力（任务级操作）
+if tc, ok := inspector.(taskqueue.TaskController); ok {
+    // 重新运行失败的任务
+    tc.RunTask(ctx, "tasks_high", taskID)
+
+    // 批量重新运行所有失败任务
+    n, _ := tc.BatchRunTasks(ctx, "tasks_high", taskqueue.TaskStateFailed)
+    fmt.Printf("Requeued %d failed tasks\n", n)
+
+    // 取消正在执行的任务
+    tc.CancelTask(ctx, taskID)
+}
+
+// 探测 QueueController 能力（队列级操作）
+if qc, ok := inspector.(taskqueue.QueueController); ok {
+    // 暂停队列（停止消费新任务）
+    qc.PauseQueue(ctx, "tasks_low")
+
+    // 恢复队列
+    qc.UnpauseQueue(ctx, "tasks_low")
+
+    // 删除队列（force=true 强制删除非空队列）
+    qc.DeleteQueue(ctx, "deprecated_queue", true)
+}
+```
+
+#### 接口能力矩阵
+
+| 接口 | asynq | RocketMQ |
+|------|-------|----------|
+| **Inspector（核心）** | ✅ 全部支持 | ✅ 部分字段 |
+| **TaskReader** | ✅ | ❌ |
+| **TaskController** | ✅ | ❌ |
+| **QueueController** | ✅ | ❌ |
+```
+
 ## 完整示例
 
 查看代码库中的示例：
@@ -644,6 +743,94 @@ return &taskqueue.TaskResult{Data: result}, nil
 | `HandleRaw(taskType, handler)` | 注册原始处理器 |
 | `Start(ctx)` | 启动消费者 |
 | `Stop()` | 停止消费者 |
+
+### Inspector API
+
+**核心接口（所有后端必须实现）**
+
+| 方法 | 说明 |
+|-----|------|
+| `Queues(ctx)` | 返回所有队列名称列表 |
+| `GetQueueStats(ctx, queue)` | 返回队列统计快照 |
+| `ListWorkers(ctx)` | 返回在线 Worker 列表 |
+| `Close()` | 释放资源（幂等） |
+
+**TaskReader 接口（可选，通过接口断言探测）**
+
+| 方法 | 说明 |
+|-----|------|
+| `GetTaskInfo(ctx, queue, taskID)` | 查询任务详情 |
+| `ListTasks(ctx, queue, state, opts)` | 按状态分页列出任务 |
+
+**TaskController 接口（可选，通过接口断言探测）**
+
+| 方法 | 说明 |
+|-----|------|
+| `DeleteTask(ctx, queue, taskID)` | 删除任务 |
+| `RunTask(ctx, queue, taskID)` | 立即运行任务 |
+| `ArchiveTask(ctx, queue, taskID)` | 归档任务 |
+| `CancelTask(ctx, taskID)` | 取消正在执行的任务 |
+| `BatchDeleteTasks(ctx, queue, state)` | 批量删除指定状态任务 |
+| `BatchRunTasks(ctx, queue, state)` | 批量运行指定状态任务 |
+| `BatchArchiveTasks(ctx, queue, state)` | 批量归档指定状态任务 |
+
+**QueueController 接口（可选，通过接口断言探测）**
+
+| 方法 | 说明 |
+|-----|------|
+| `PauseQueue(ctx, queue)` | 暂停队列 |
+| `UnpauseQueue(ctx, queue)` | 恢复队列 |
+| `DeleteQueue(ctx, queue, force)` | 删除队列 |
+
+**数据模型**
+
+```go
+// QueueStats 队列统计快照
+type QueueStats struct {
+    Queue     string    // 队列名称
+    Pending   int       // 等待执行的任务数
+    Scheduled int       // 延迟调度中的任务数
+    Active    int       // 正在执行的任务数
+    Retry     int       // 等待重试的任务数
+    Failed    int       // 已失败的任务数
+    Completed int       // 已完成的任务数
+    Paused    bool      // 队列是否已暂停
+    Timestamp time.Time // 统计时间点
+}
+
+// TaskState 任务状态
+const (
+    TaskStatePending   TaskState = "pending"   // 等待执行
+    TaskStateScheduled TaskState = "scheduled" // 延迟调度中
+    TaskStateActive    TaskState = "active"    // 正在执行
+    TaskStateRetry     TaskState = "retry"     // 等待重试
+    TaskStateFailed    TaskState = "failed"    // 已失败
+    TaskStateCompleted TaskState = "completed" // 已完成
+)
+
+// TaskDetail 任务详情
+type TaskDetail struct {
+    ID            string
+    Queue         string
+    Type          string
+    State         TaskState
+    MaxRetry      int
+    Retried       int
+    LastError     string
+    NextProcessAt *time.Time
+    Payload       []byte // 纯业务数据（已去除内部封装）
+}
+
+// WorkerInfo Worker 实例信息
+type WorkerInfo struct {
+    ID          string
+    Host        string
+    PID         int
+    Queues      []string
+    StartedAt   time.Time
+    ActiveTasks int
+}
+```
 
 ## 性能调优
 
