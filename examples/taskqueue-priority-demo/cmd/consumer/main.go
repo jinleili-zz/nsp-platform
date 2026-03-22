@@ -9,10 +9,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
-
-	"github.com/hibiken/asynq"
 
 	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/internal/config"
 	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/internal/handler"
@@ -122,10 +121,7 @@ func (p *TaskProcessor) Process(ctx context.Context, payload *taskqueue.TaskPayl
 
 // createConsumer 创建并配置消费者
 func createConsumer(cfg *config.Config, processor *TaskProcessor) taskqueue.Consumer {
-	redisOpt := asynq.RedisClientOpt{
-		Addr: cfg.RedisAddr,
-		DB:   cfg.RedisDB,
-	}
+	redisOpt := cfg.RedisConnOpt()
 
 	consumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
 		Concurrency: cfg.Concurrency,
@@ -149,7 +145,7 @@ func createConsumer(cfg *config.Config, processor *TaskProcessor) taskqueue.Cons
 func printConsumerInfo(cfg *config.Config) {
 	fmt.Println("\n========== Consumer Configuration ==========")
 	fmt.Printf("Instance ID:     %s\n", cfg.InstanceID)
-	fmt.Printf("Redis Address:   %s\n", cfg.RedisAddr)
+	fmt.Printf("Redis Address:   %s\n", strings.Join(cfg.RedisAddrs, ","))
 	fmt.Printf("Concurrency:     %d\n", cfg.Concurrency)
 	fmt.Println("\nQueue Weights (Priority Order):")
 	fmt.Printf("  %-40s weight=%d\n", config.QueueTaskHigh, cfg.QueueWeights[config.QueueTaskHigh])
@@ -174,11 +170,7 @@ func main() {
 	printConsumerInfo(cfg)
 
 	// 创建 broker 用于发送回调
-	redisOpt := asynq.RedisClientOpt{
-		Addr: cfg.RedisAddr,
-		DB:   cfg.RedisDB,
-	}
-	broker := asynqbroker.NewBroker(redisOpt)
+	broker := asynqbroker.NewBroker(cfg.RedisConnOpt())
 	defer broker.Close()
 
 	// 创建回调发送器
