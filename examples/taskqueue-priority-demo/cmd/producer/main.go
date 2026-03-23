@@ -26,7 +26,7 @@ import (
 type TaskProducer struct {
 	broker    taskqueue.Broker
 	config    *config.Config
-	inspector *asynq.Inspector
+	inspector taskqueue.Inspector
 }
 
 // NewTaskProducer 创建任务生产者
@@ -34,7 +34,7 @@ func NewTaskProducer(cfg *config.Config) (*TaskProducer, error) {
 	redisOpt := cfg.RedisConnOpt()
 
 	broker := asynqbroker.NewBroker(redisOpt)
-	inspector := asynq.NewInspector(redisOpt)
+	inspector := asynqbroker.NewInspector(redisOpt)
 
 	return &TaskProducer{
 		broker:    broker,
@@ -47,6 +47,9 @@ func NewTaskProducer(cfg *config.Config) (*TaskProducer, error) {
 func (p *TaskProducer) Close() error {
 	if p.broker != nil {
 		p.broker.Close()
+	}
+	if p.inspector != nil {
+		p.inspector.Close()
 	}
 	return nil
 }
@@ -149,15 +152,17 @@ func (p *TaskProducer) GetQueueStats() error {
 		config.QueueResultCallback,
 	}
 
+	ctx := context.Background()
+
 	fmt.Println("\n========== Queue Statistics ==========")
 	for _, queue := range queues {
-		info, err := p.inspector.GetQueueInfo(queue)
+		stats, err := p.inspector.GetQueueStats(ctx, queue)
 		if err != nil {
 			fmt.Printf("Queue: %-40s | Error: %v\n", queue, err)
 			continue
 		}
 		fmt.Printf("Queue: %-40s | Pending: %3d | Active: %3d | Completed: %3d | Failed: %3d\n",
-			queue, info.Pending, info.Active, info.Completed, info.Failed)
+			queue, stats.Pending, stats.Active, stats.Completed, stats.Failed)
 	}
 	fmt.Println("======================================")
 	return nil
