@@ -1,3 +1,14 @@
+- # Git 提交规范
+
+所有提交到 GitHub 的变更，必须通过 Pull Request（PR）方式合并，禁止直接推送到 main 分支。
+
+操作流程：
+1. 从 main 切出新分支（命名规范：`<type>/<short-description>`，例如 `feat/add-auth`、`fix/broker-crash`、`proposal/xxx`）
+2. 在新分支上完成开发并提交（commit）
+3. 将分支推送到 remote：`git push -u origin <branch-name>`
+4. 使用 `gh pr create` 创建 PR，目标分支为 main
+5. 不得使用 `git push origin main` 直接推送
+
 - # 背景
 
 我在开发 NSP 项目，这是一个基于 Go 的微服务平台。
