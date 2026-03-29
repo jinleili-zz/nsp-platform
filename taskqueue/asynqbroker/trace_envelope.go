@@ -20,7 +20,7 @@ type taskEnvelope struct {
 	Sampled bool              `json:"_smpl"`
 	ReplyTo *json.RawMessage  `json:"_rto,omitempty"`
 	Meta    map[string]string `json:"_meta,omitempty"`
-	Payload json.RawMessage   `json:"payload"`
+	Payload []byte            `json:"payload"`
 }
 
 // wrapWithTrace extracts TraceContext from ctx and wraps the payload into an

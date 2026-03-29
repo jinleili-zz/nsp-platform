@@ -60,6 +60,31 @@ func TestWrapWithTrace_WithMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestWrapWithTrace_WithNonJSONPayloadPreservesEnvelopeFields(t *testing.T) {
+	payload := []byte("plain-text-payload")
+	reply := &taskqueue.ReplySpec{Queue: "callback-q"}
+	metadata := map[string]string{"tenant": "acme"}
+
+	result := wrapWithTrace(context.Background(), payload, reply, metadata)
+	if string(result) == string(payload) {
+		t.Fatal("expected envelope payload, got raw payload")
+	}
+
+	decodedPayload, traceMeta, decodedReply, decodedMetadata := unwrapEnvelope(result)
+	if string(decodedPayload) != string(payload) {
+		t.Fatalf("unexpected payload after unwrap: %q", decodedPayload)
+	}
+	if traceMeta != nil {
+		t.Fatalf("expected nil trace metadata, got %#v", traceMeta)
+	}
+	if decodedReply == nil || decodedReply.Queue != reply.Queue {
+		t.Fatalf("unexpected reply after unwrap: %#v", decodedReply)
+	}
+	if !reflect.DeepEqual(decodedMetadata, metadata) {
+		t.Fatalf("unexpected metadata after unwrap: %#v", decodedMetadata)
+	}
+}
+
 func TestWrapWithTrace_WithTraceInContext(t *testing.T) {
 	payload := []byte(`{"task_id":"t1","resource_id":"r1"}`)
 	tc := &trace.TraceContext{
