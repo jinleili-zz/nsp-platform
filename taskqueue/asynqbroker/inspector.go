@@ -447,7 +447,7 @@ func convertTaskInfo(info *asynq.TaskInfo) *taskqueue.TaskDetail {
 	}
 
 	// Payload: 去除 trace envelope，返回纯业务数据
-	payload, _ := unwrapEnvelope(info.Payload)
+	payload, _, _, _ := unwrapEnvelope(info.Payload)
 	detail.Payload = payload
 
 	return detail

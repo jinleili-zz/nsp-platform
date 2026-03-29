@@ -8,7 +8,7 @@ NSP (Network Service Platform) 是一个基于 Go 语言构建的微服务平台
 - **trace** - 分布式链路追踪模块
 - **saga** - SAGA 分布式事务模块
 - **logger** - 统一日志模块
-- **taskqueue** - 任务队列编排模块
+- **taskqueue** - 异步任务队列 Broker 抽象模块
 
 ## 目录结构
 
@@ -18,7 +18,7 @@ nsp-platform/
 ├── trace/              # 分布式链路追踪
 ├── saga/               # SAGA 分布式事务
 ├── logger/             # 统一日志
-├── taskqueue/          # 任务队列编排
+├── taskqueue/          # 异步任务队列 Broker 抽象
 ├── lock/               # 分布式锁
 ├── config/             # 配置管理
 ├── docs/               # 文档
@@ -112,31 +112,31 @@ nsp-platform/
 │  ┌──────────────────────────────────────────┐  ┌──────────────────────────────────────┐ │
 │  │                 saga                      │  │              taskqueue               │ │
 │  │  ┌──────────────────────────────────┐    │  │  ┌──────────────────────────────┐    │ │
-│  │  │           Engine                 │    │  │  │           Engine             │    │ │
-│  │  │  ├─ Submit(ctx, def) → txID      │    │  │  │  ├─ SubmitWorkflow(def)      │    │ │
-│  │  │  ├─ Query(ctx, txID) → status    │    │  │  │  ├─ HandleCallback(cb)       │    │ │
-│  │  │  ├─ Start(ctx) / Stop()          │    │  │  │  ├─ QueryWorkflow(id)        │    │ │
-│  │  │  └─ trace 自动注入               │    │  │  │  └─ RetryStep(stepID)        │    │ │
-│  │  ├──────────────────────────────────┤    │  │  ├──────────────────────────────┤    │ │
-│  │  │         Coordinator              │    │  │  │         Broker               │    │ │
-│  │  │  ├─ 状态机驱动                   │    │  │  │  ├─ Publish(task)            │    │ │
-│  │  │  ├─ 崩溃恢复                     │    │  │  │  └─ (asynq/kafka/...)        │    │ │
+│  │  │           Engine                 │    │  │  │       Broker / Consumer      │    │ │
+│  │  │  ├─ Submit(ctx, def) → txID      │    │  │  │  ├─ Publish(task)            │    │ │
+│  │  │  ├─ Query(ctx, txID) → status    │    │  │  │  ├─ Handle(type, fn)         │    │ │
+│  │  │  ├─ Start(ctx) / Stop()          │    │  │  │  └─ Start(ctx) / Stop()      │    │ │
+│  │  │  └─ trace 自动注入               │    │  │  ├──────────────────────────────┤    │ │
+│  │  ├──────────────────────────────────┤    │  │  │        Asynq Adapter          │    │ │
+│  │  │         Coordinator              │    │  │  │  ├─ trace envelope           │    │ │
+│  │  │  ├─ 状态机驱动                   │    │  │  │  ├─ reply / metadata         │    │ │
+│  │  │  ├─ 崩溃恢复                     │    │  │  │  └─ payload passthrough      │    │ │
 │  │  │  └─ 超时扫描                     │    │  │  ├──────────────────────────────┤    │ │
-│  │  ├──────────────────────────────────┤    │  │  │      CallbackSender          │    │ │
-│  │  │          Executor                │    │  │  │  ├─ Success(taskID, result)  │    │ │
-│  │  │  ├─ ExecuteStep (同步)           │    │  │  │  └─ Fail(taskID, error)      │    │ │
-│  │  │  ├─ ExecuteAsyncStep (异步)      │    │  │  ├──────────────────────────────┤    │ │
-│  │  │  ├─ CompensateStep (补偿)        │    │  │  │      QueueRouter             │    │ │
-│  │  │  └─ Poll (轮询)                  │    │  │  │  tasks_{tag}_{priority}      │    │ │
-│  │  ├──────────────────────────────────┤    │  │  └──────────────────────────────┘    │ │
-│  │  │           Poller                 │    │  │                                      │ │
-│  │  │  ├─ 异步步骤状态轮询             │    │  │  优先级: Low(1) Normal(3)            │ │
-│  │  │  └─ JSONPath 结果匹配            │    │  │          High(6) Critical(9)         │ │
+│  │  ├──────────────────────────────────┤    │  │  │          Inspector            │    │ │
+│  │  │          Executor                │    │  │  │  ├─ Queues / Stats           │    │ │
+│  │  │  ├─ ExecuteStep (同步)           │    │  │  │  ├─ TaskReader               │    │ │
+│  │  │  ├─ ExecuteAsyncStep (异步)      │    │  │  │  └─ QueueController          │    │ │
+│  │  │  ├─ CompensateStep (补偿)        │    │  │  ├──────────────────────────────┤    │ │
+│  │  │  └─ Poll (轮询)                  │    │  │  │        Current Scope         │    │ │
+│  │  ├──────────────────────────────────┤    │  │  │  broker-only, no workflow    │    │ │
+│  │  │           Poller                 │    │  │  │  built-in asynq backend      │    │ │
+│  │  │  ├─ 异步步骤状态轮询             │    │  │  │  explicit queue selection    │    │ │
+│  │  │  └─ JSONPath 结果匹配            │    │  │  └──────────────────────────────┘    │ │
 │  │  ├──────────────────────────────────┤    │  │                                      │ │
-│  │  │         Template                 │    │  │  状态流转:                            │ │
-│  │  │  {action_response.field}         │    │  │  pending → queued → running          │ │
-│  │  │  {step[0].action_response.x}     │    │  │      ↓                                │ │
-│  │  │  {transaction.payload.field}     │    │  │  completed / failed                   │ │
+│  │  │         Template                 │    │  │  envelope: _tid/_sid/_rto/_meta      │ │
+│  │  │  {action_response.field}         │    │  │  handler: func(ctx, *Task) error     │ │
+│  │  │  {step[0].action_response.x}     │    │  │  queue: chosen by task.Queue         │ │
+│  │  │  {transaction.payload.field}     │    │  │                                      │ │
 │  │  └──────────────────────────────────┘    │  └──────────────────────────────────────┘ │
 │  │                                          │                                           │
 │  │  状态流转:                                │                                           │
@@ -150,12 +150,12 @@ nsp-platform/
            ▼                ▼                              ▼               ▼
 ┌─────────────────────────────────────────────┐  ┌─────────────────────────────────────────┐
 │              PostgreSQL                      │  │           Message Queue                 │
-│  ┌────────────────┐  ┌────────────────────┐  │  │  ┌─────────────────────────────────┐    │
-│  │saga_transactions│  │ taskqueue_workflows│  │  │  │  Asynq (Redis) / Kafka / ...   │    │
-│  ├────────────────┤  ├────────────────────┤  │  │  │                                 │    │
-│  │  saga_steps    │  │ taskqueue_steps    │  │  │  │  ┌───────┐  ┌───────┐  ┌─────┐ │    │
-│  ├────────────────┤  └────────────────────┘  │  │  │  │tasks  │  │tasks_ │  │task_│ │    │
-│  │saga_poll_tasks │                          │  │  │  │       │  │high   │  │cb   │ │    │
+│  ┌────────────────┐                          │  │  ┌─────────────────────────────────┐    │
+│  │saga_transactions│                         │  │  │         Asynq (Redis)          │    │
+│  ├────────────────┤                          │  │  │                                 │    │
+│  │  saga_steps    │                          │  │  │  ┌──────────┐ ┌──────────────┐ │    │
+│  ├────────────────┤                          │  │  │  │orders:hi │ │orders:callback│ │    │
+│  │saga_poll_tasks │                          │  │  │  └──────────┘ └──────────────┘ │    │
 │  └────────────────┘                          │  │  │  └───────┘  └───────┘  └─────┘ │    │
 └─────────────────────────────────────────────┘  │  └─────────────────────────────────┘    │
                                                  └─────────────────────────────────────────┘
@@ -292,7 +292,7 @@ engine.Submit(ctx, def)
 | **trace** | B3 格式链路追踪、跨服务透传 |
 | **logger** | 结构化日志、trace 关联、第三方框架适配 |
 | **saga** | 分布式事务编排、补偿回滚、异步轮询 |
-| **taskqueue** | 工作流编排、优先级队列、回调驱动 |
+| **taskqueue** | 异步任务发布与消费、trace 透传、reply 队列与巡检 |
 
 ---
 
@@ -970,16 +970,18 @@ asynq.WithLogger(logger.NewWriterAdapter(nil,
 
 ---
 
-## 模块五：任务队列编排模块 (taskqueue)
+## 模块五：任务队列模块 (taskqueue)
 
 ### 功能概述
 
-基于消息队列的工作流编排框架，支持：
-- 多步骤工作流
-- 优先级队列
-- 步骤重试
-- 回调机制
-- 队列路由
+`taskqueue` 当前定位是纯 broker 抽象层，负责统一任务消息模型、发布/消费接口和巡检接口。
+
+当前仓库中的设计约束：
+
+- 不再提供 workflow 编排、数据库状态机或回调驱动引擎
+- 不再提供 `Engine`、`WorkflowDefinition`、`TaskPayload`、`TaskResult`、`CallbackPayload`
+- 仓库内当前只保留 `asynqbroker` 实现
+- 通过内部 envelope 支持 trace、reply 和 metadata 透传
 
 ### 核心数据结构
 
@@ -991,75 +993,35 @@ asynq.WithLogger(logger.NewWriterAdapter(nil,
 | `PriorityHigh` | 6 | 高优先级 |
 | `PriorityCritical` | 9 | 紧急优先级 |
 
-#### 工作流状态
-| 状态 | 说明 |
-|-----|------|
-| `pending` | 待执行 |
-| `running` | 执行中 |
-| `succeeded` | 成功 |
-| `failed` | 失败 |
+#### `ReplySpec`
 
-#### 步骤状态
-| 状态 | 说明 |
-|-----|------|
-| `pending` | 待执行 |
-| `queued` | 已入队 |
-| `running` | 执行中 |
-| `completed` | 完成 |
-| `failed` | 失败 |
+```go
+type ReplySpec struct {
+    Queue string
+}
+```
+
+#### `Task`
+
+```go
+type Task struct {
+    Type     string
+    Payload  []byte
+    Queue    string
+    Reply    *ReplySpec
+    Priority Priority
+    Metadata map[string]string
+}
+```
+
+说明：
+
+- `Payload` 保存业务消息体，broker 不解析其业务语义
+- `Queue` 由业务方显式指定
+- `Reply` 为 `nil` 时表示不要求 worker 回复
+- `Priority` 在当前实现中是保留字段，不会自动映射成队列名
 
 ### API 列表
-
-#### 引擎 (engine.go)
-
-| 类型/函数 | 说明 |
-|----------|------|
-| `Config` | 引擎配置 |
-| `NewEngine(cfg, broker) (*Engine, error)` | 创建引擎（自动管理数据库连接） |
-| `NewEngineWithStore(cfg, broker, store) *Engine` | 创建引擎（外部提供 Store，适用于测试） |
-| `Engine.Migrate(ctx) error` | 执行数据库迁移 |
-| `Engine.SubmitWorkflow(ctx, def) (string, error)` | 提交工作流 |
-| `Engine.HandleCallback(ctx, cb) error` | 处理回调 |
-| `Engine.QueryWorkflow(ctx, workflowID) (*WorkflowStatusResponse, error)` | 查询工作流 |
-| `Engine.RetryStep(ctx, stepID) error` | 重试步骤 |
-| `Engine.NewCallbackSender() *CallbackSender` | 创建回调发送器 |
-| `Engine.Stop() error` | 停止引擎 |
-
-#### WorkflowHooks — 生命周期钩子
-
-通过 `Config.Hooks` 注册回调，在工作流/步骤状态变更时同步外部资源（如业务表）：
-
-```go
-type WorkflowHooks struct {
-    OnStepComplete   func(ctx, workflow, step) error           // 步骤成功后、下一步入队前
-    OnStepFailed     func(ctx, workflow, step, errMsg) error   // 步骤重试耗尽、Workflow 标记失败前
-    OnWorkflowComplete func(ctx, workflow) error               // 所有步骤完成、Workflow 标记成功后
-    OnWorkflowFailed   func(ctx, workflow, errMsg) error       // Workflow 标记失败后
-}
-```
-
-> 钩子执行失败仅记日志，不会阻塞工作流状态机。
-
-#### 工作流定义
-
-```go
-type WorkflowDefinition struct {
-    Name         string
-    ResourceType string
-    ResourceID   string
-    Metadata     map[string]string
-    Steps        []StepDefinition
-}
-
-type StepDefinition struct {
-    TaskType   string   // 任务类型标识
-    TaskName   string   // 任务名称
-    Params     string   // JSON 参数
-    QueueTag   string   // 队列路由标签
-    Priority   Priority // 优先级
-    MaxRetries int      // 最大重试次数
-}
-```
 
 #### Broker 接口 (broker.go)
 
@@ -1070,80 +1032,84 @@ type Broker interface {
 }
 ```
 
-#### Store 接口 (store.go)
+#### Consumer 接口 (consumer.go)
 
-| 方法 | 说明 |
-|-----|------|
-| `Migrate(ctx) error` | 数据库迁移 |
-| `CreateWorkflow(ctx, wf) error` | 创建工作流 |
-| `GetWorkflow(ctx, id) (*Workflow, error)` | 获取工作流 |
-| `UpdateWorkflowStatus(ctx, id, status, error) error` | 更新状态 |
-| `IncrementCompletedSteps(ctx, id) error` | 递增完成步骤计数 |
-| `IncrementFailedSteps(ctx, id) error` | 递增失败步骤计数 |
-| `BatchCreateSteps(ctx, steps) error` | 批量创建步骤 |
-| `GetStep(ctx, id) (*StepTask, error)` | 获取步骤 |
-| `GetStepsByWorkflow(ctx, workflowID) ([]*StepTask, error)` | 获取工作流所有步骤 |
-| `GetNextPendingStep(ctx, workflowID) (*StepTask, error)` | 获取下一个待执行步骤 |
-| `UpdateStepStatus(ctx, id, status) error` | 更新步骤状态 |
-| `UpdateStepResult(ctx, id, status, result, error) error` | 更新步骤结果 |
-| `UpdateStepBrokerID(ctx, id, brokerTaskID) error` | 更新 Broker 任务 ID |
-| `GetStepStats(ctx, workflowID) (*StepStats, error)` | 获取统计信息 |
+```go
+type HandlerFunc func(ctx context.Context, task *Task) error
 
-#### 回调发送器
-
-| 类型/函数 | 说明 |
-|----------|------|
-| `CallbackSender` | 回调发送器 |
-| `NewCallbackSenderFromBroker(broker, queue) *CallbackSender` | 创建发送器 |
-| `CallbackSender.Success(ctx, taskID, result) error` | 发送成功回调 |
-| `CallbackSender.Fail(ctx, taskID, errorMsg) error` | 发送失败回调 |
-
-### 队列路由
-
-默认路由器 `DefaultQueueRouter` 生成队列名称：
+type Consumer interface {
+    Handle(taskType string, handler HandlerFunc)
+    Start(ctx context.Context) error
+    Stop() error
+}
 ```
-tasks              # 普通优先级，无标签
-tasks_high         # 高优先级
-tasks_critical     # 紧急优先级
-tasks_low          # 低优先级
-tasks_{tag}        # 带标签
-tasks_{tag}_high   # 带标签和高优先级
-tasks_{tag}_critical # 带标签和紧急优先级
-tasks_{tag}_low    # 带标签和低优先级
-```
+
+#### Inspector 相关接口 (inspector.go)
+
+`taskqueue` 保留四层巡检能力抽象：
+
+- `Inspector`
+- `TaskReader`
+- `TaskController`
+- `QueueController`
+
+当前 `asynqbroker.Inspector` 实现了全部四层。
+
+### Asynq 行为
+
+当满足以下任一条件时，`asynqbroker.Broker.Publish` 会把业务 payload 封装进内部 envelope：
+
+- `ctx` 中存在 trace 上下文
+- `Task.Reply != nil`
+- `len(Task.Metadata) > 0`
+
+内部字段包括：
+
+- `_v`: envelope 版本
+- `_tid`: TraceID
+- `_sid`: SpanId
+- `_smpl`: Sampled
+- `_rto`: ReplySpec
+- `_meta`: Metadata
+- `payload`: 原始业务消息体
+
+消费端会自动解包 envelope，恢复 trace、reply 和 metadata，并把完整 `*taskqueue.Task` 传给 handler。
 
 ### 使用示例
 
 ```go
-// 编排端
-engine, _ := taskqueue.NewEngine(&taskqueue.Config{
-    DSN:           "postgres://...",
-    CallbackQueue: "task_callbacks",
-    Hooks: &taskqueue.WorkflowHooks{
-        OnStepComplete: func(ctx context.Context, wf *taskqueue.Workflow, step *taskqueue.StepTask) error {
-            log.Printf("step %s completed", step.TaskName)
-            return nil
-        },
-    },
-}, asynqBroker)
+broker := asynqbroker.NewBroker(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
+defer broker.Close()
 
-def := &taskqueue.WorkflowDefinition{
-    Name:         "create-vrf",
-    ResourceType: "vrf",
-    ResourceID:   "VRF-001",
-    Steps: []taskqueue.StepDefinition{
-        {TaskType: "create_vrf_on_switch", TaskName: "Switch-A", Params: `{...}`},
-        {TaskType: "create_vrf_on_switch", TaskName: "Switch-B", Params: `{...}`},
-    },
-}
-workflowID, _ := engine.SubmitWorkflow(ctx, def)
+body, _ := json.Marshal(map[string]any{
+    "order_id": "ORD-001",
+})
 
-// Worker 端
-sender := taskqueue.NewCallbackSenderFromBroker(broker, "task_callbacks")
-// 处理成功
-sender.Success(ctx, taskID, result)
-// 处理失败
-sender.Fail(ctx, taskID, "error message")
+_, _ = broker.Publish(context.Background(), &taskqueue.Task{
+    Type:    "order:create",
+    Payload: body,
+    Queue:   "orders:high",
+    Reply:   &taskqueue.ReplySpec{Queue: "orders:callback"},
+    Metadata: map[string]string{
+        "tenant": "acme",
+    },
+})
+
+consumer := asynqbroker.NewConsumer(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}, asynqbroker.ConsumerConfig{
+    Concurrency: 4,
+    Queues: map[string]int{
+        "orders:high": 30,
+    },
+})
+
+consumer.Handle("order:create", func(ctx context.Context, task *taskqueue.Task) error {
+    var payload map[string]any
+    if err := json.Unmarshal(task.Payload, &payload); err != nil {
+        return err
+    }
+    _ = payload
+    return nil
+})
 ```
 
 ---

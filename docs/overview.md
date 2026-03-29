@@ -50,7 +50,7 @@
 | **config** | `pkg/config` | 统一配置加载，支持热更新、环境变量覆盖、严格校验 |
 | **lock** | `pkg/lock` | 分布式锁，基于 Redis Cluster，支持 Watchdog 自动续期 |
 | **saga** | `pkg/saga` | SAGA 分布式事务，自动补偿回滚，支持同步/异步步骤 |
-| **taskqueue** | `pkg/taskqueue` | 异步任务队列与 Workflow 编排，支持 Asynq / RocketMQ |
+| **taskqueue** | `pkg/taskqueue` | 异步任务投递与队列巡检抽象，当前提供 Asynq 适配与 Reply/Trace/Metadata 透传 |
 
 ### 设计原则
 

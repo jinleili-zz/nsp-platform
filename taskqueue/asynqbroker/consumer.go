@@ -2,8 +2,6 @@ package asynqbroker
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log"
 
 	"github.com/hibiken/asynq"
@@ -52,46 +50,27 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 }
 
 // Handle registers a handler for the given task type.
-// The handler receives a decoded TaskPayload (not the raw asynq.Task).
+// The handler receives the broker-level Task reconstructed from the asynq message.
 func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
 	c.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
-		rawBytes, metadata := unwrapEnvelope(t.Payload())
-		ctx = injectTraceFromMetadata(ctx, metadata)
+		payload, traceMeta, reply, metadata := unwrapEnvelope(t.Payload())
+		ctx = injectTraceFromMetadata(ctx, traceMeta)
 
-		var raw struct {
-			TaskID     string `json:"task_id"`
-			ResourceID string `json:"resource_id"`
-			TaskParams string `json:"task_params"`
-		}
-		if err := json.Unmarshal(rawBytes, &raw); err != nil {
-			return fmt.Errorf("failed to unmarshal task payload: %w", err)
-		}
-
-		payload := &taskqueue.TaskPayload{
-			TaskID:     raw.TaskID,
-			TaskType:   t.Type(),
-			ResourceID: raw.ResourceID,
-			Params:     []byte(raw.TaskParams),
+		queueName, _ := asynq.GetQueueName(ctx)
+		task := &taskqueue.Task{
+			Type:     t.Type(),
+			Payload:  payload,
+			Queue:    queueName,
+			Reply:    reply,
+			Metadata: metadata,
 		}
 
-		result, err := handler(ctx, payload)
-		if err != nil {
-			log.Printf("[asynqbroker] handler error: type=%s, task_id=%s, err=%v", taskType, raw.TaskID, err)
+		if err := handler(ctx, task); err != nil {
+			taskID, _ := asynq.GetTaskID(ctx)
+			log.Printf("[asynqbroker] handler error: type=%s, task_id=%s, err=%v", taskType, taskID, err)
 			return err
 		}
-
-		_ = result // result is used by the caller via CallbackSender
 		return nil
-	})
-}
-
-// HandleRaw registers a raw asynq handler. This is useful for special task types
-// like "task_callback" where the payload format differs.
-func (c *Consumer) HandleRaw(taskType string, handler func(context.Context, *asynq.Task) error) {
-	c.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
-		rawBytes, metadata := unwrapEnvelope(t.Payload())
-		ctx = injectTraceFromMetadata(ctx, metadata)
-		return handler(ctx, asynq.NewTask(t.Type(), rawBytes))
 	})
 }
 
