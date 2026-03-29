@@ -55,7 +55,7 @@
 | **config** | `config` | 统一配置加载，支持热更新、环境变量覆盖、严格校验 |
 | **lock** | `lock` | 分布式锁，基于 Redis Cluster，支持 Watchdog 自动续期 |
 | **saga** | `saga` | SAGA 分布式事务，自动补偿回滚，支持同步/异步步骤 |
-| **taskqueue** | `taskqueue` | 异步任务队列与 Workflow 编排，支持 Asynq / RocketMQ |
+| **taskqueue** | `taskqueue` | 异步任务队列 Broker 抽象，当前仓库提供 asynq 适配 |
 
 ### 设计原则
 
@@ -1200,29 +1200,34 @@ var (
 
 #### 功能说明
 
-TaskQueue 模块为 NSP 平台提供**异步任务队列与 Workflow 编排**能力。核心特性：
+TaskQueue 模块现在只负责**异步任务消息的统一抽象**，不再承担 workflow 编排职责。核心特性：
 
-- **接口抽象**：`Broker` / `Consumer` 解耦消息队列实现，支持 Asynq 和 RocketMQ
-- **有序 Workflow**：步骤按 `StepOrder` 依次执行，前一步完成后自动触发下一步入队
-- **自动重试**：步骤失败按 `MaxRetries` 自动重试，耗尽后标记 Workflow 失败
-- **手动重试**：支持通过 `RetryStep` 对已失败步骤单独重试
-- **优先级队列**：四档优先级映射到不同队列
+- **接口抽象**：`Broker` / `Consumer` / `Inspector` 解耦具体消息队列实现
+- **统一任务模型**：所有发布与消费都围绕 `Task`、`ReplySpec`、`HandlerFunc`
+- **上下文透传**：asynq 适配层自动透传 trace、reply 和 metadata
+- **可观测性**：通过 inspector 抽象读取、控制和巡检队列任务
+
+仓库内已移除：
+
+- `Engine`
+- `WorkflowDefinition`
+- `TaskPayload`
+- `TaskResult`
+- `CallbackPayload`
+- `HandleRaw`
+- `rocketmqbroker`
 
 #### 架构角色
 
 ```
-Orchestrator（编排侧）                  Worker（执行侧）
+Producer（生产侧）                      Worker（消费侧）
 ┌──────────────────────────────┐        ┌─────────────────────────────┐
-│  Engine.SubmitWorkflow(...)  │        │  Consumer.Handle(type, fn)  │
+│  Broker.Publish(task)        │        │  Consumer.Handle(type, fn)  │
 │         │ 入队                │        │         │ 接收任务           │
 │         ▼                    │        │         ▼                   │
-│  Broker.Publish(step[0])─────┼──────►│  HandlerFunc(ctx, payload)  │
-│                              │        │         │                   │
-│  Engine.HandleCallback(...)◄─┼────────┤  CallbackSender.Success/Fail│
-│         │ 驱动状态机           │        └─────────────────────────────┘
-│         ▼                    │
-│  Broker.Publish(step[N+1])   │
-└──────────────────────────────┘
+│  asynqbroker.Broker          ├──────►│  HandlerFunc(ctx, *Task)    │
+│  自动封装 trace/reply/meta    │        │  自动恢复 trace/reply/meta  │
+└──────────────────────────────┘        └─────────────────────────────┘
 ```
 
 #### 核心接口
@@ -1241,43 +1246,10 @@ type Consumer interface {
     Stop() error
 }
 
-type HandlerFunc func(ctx context.Context, payload *TaskPayload) (*TaskResult, error)
-
-// Engine — 编排侧
-engine, err := taskqueue.NewEngine(cfg, broker)             // 自动管理数据库连接
-engine := taskqueue.NewEngineWithStore(cfg, broker, store)  // 外部提供 Store（测试用）
-workflowID, err := engine.SubmitWorkflow(ctx, def)
-err = engine.HandleCallback(ctx, cb)
-resp, err := engine.QueryWorkflow(ctx, workflowID)
-err = engine.RetryStep(ctx, stepID)
-
-// CallbackSender — Worker 侧
-sender := engine.NewCallbackSender()
-sender.Success(ctx, taskID, result)
-sender.Fail(ctx, taskID, errorMsg)
+type HandlerFunc func(ctx context.Context, task *Task) error
 ```
 
-#### 配置项
-
-**`Config`**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `DSN` | `string` | PostgreSQL 连接串，必填 |
-| `CallbackQueue` | `string` | Worker 回调消息的目标队列名 |
-| `QueueRouter` | `QueueRouterFunc` | 自定义队列路由函数，nil 使用默认规则 |
-| `Hooks` | `*WorkflowHooks` | 生命周期钩子，用于在状态变更时同步外部资源 |
-
-**`WorkflowHooks`**
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `OnStepComplete` | `func(ctx, workflow, step) error` | 步骤成功后、下一步入队前 |
-| `OnStepFailed` | `func(ctx, workflow, step, errMsg) error` | 步骤重试耗尽、Workflow 失败前 |
-| `OnWorkflowComplete` | `func(ctx, workflow) error` | 所有步骤完成、Workflow 成功后 |
-| `OnWorkflowFailed` | `func(ctx, workflow, errMsg) error` | Workflow 标记失败后 |
-
-> 钩子执行失败仅记日志，不会阻塞状态机。
+#### 核心模型
 
 **优先级常量**
 
@@ -1288,150 +1260,118 @@ sender.Fail(ctx, taskID, errorMsg)
 | `PriorityHigh` | 6 | 高优先级 |
 | `PriorityCritical` | 9 | 紧急优先级 |
 
-#### 快速使用
-
-**编排侧：提交 Workflow**
+**`ReplySpec`**
 
 ```go
-broker, _ := asynqbroker.NewBroker(asynqbroker.Config{RedisAddr: "localhost:6379"})
+type ReplySpec struct {
+    Queue string
+}
+```
+
+**`Task`**
+
+```go
+type Task struct {
+    Type     string
+    Payload  []byte
+    Queue    string
+    Reply    *ReplySpec
+    Priority Priority
+    Metadata map[string]string
+}
+```
+
+使用约定：
+
+- `Payload` 存放业务 JSON，不再区分 `TaskPayload` / `TaskResult`
+- `Queue` 由业务显式决定
+- `Reply` 为 `nil` 表示 fire-and-forget
+- `Priority` 是保留字段，当前 asynq 适配不会自动把它转换成队列名
+
+#### 快速使用
+
+**Producer：发布任务**
+
+```go
+broker := asynqbroker.NewBroker(asynq.RedisClientOpt{Addr: "localhost:6379"})
 defer broker.Close()
 
-engine, _ := taskqueue.NewEngine(&taskqueue.Config{
-    DSN:           "postgres://...",
-    CallbackQueue: "task-callbacks",
-}, broker)
-defer engine.Stop()
-
-engine.Migrate(context.Background()) // 首次部署执行一次
-
 params, _ := json.Marshal(map[string]any{"vlan_id": 100})
-workflowID, err := engine.SubmitWorkflow(ctx, &taskqueue.WorkflowDefinition{
-    Name:         "network-provisioning",
-    ResourceType: "switch",
-    ResourceID:   "SW-001",
-    Steps: []taskqueue.StepDefinition{
-        {TaskType: "create_vlan", TaskName: "创建VLAN", Params: string(params), QueueTag: "switch", Priority: taskqueue.PriorityHigh},
-        {TaskType: "bind_ports",  TaskName: "绑定端口",  Params: string(params), QueueTag: "switch"},
+_, err := broker.Publish(ctx, &taskqueue.Task{
+    Type:    "create_vlan",
+    Payload: params,
+    Queue:   "tasks_switch_high",
+    Reply:   &taskqueue.ReplySpec{Queue: "task-callbacks"},
+    Metadata: map[string]string{
+        "tenant": "acme",
     },
 })
 ```
 
-**Worker 侧：注册处理函数**
+**Worker：消费任务**
 
 ```go
-consumer, _ := asynqbroker.NewConsumer(asynqbroker.ConsumerConfig{
-    RedisAddr:   "localhost:6379",
+consumer := asynqbroker.NewConsumer(asynq.RedisClientOpt{Addr: "localhost:6379"}, asynqbroker.ConsumerConfig{
     Queues:      map[string]int{"tasks_switch_high": 6, "tasks_switch": 3},
     Concurrency: 10,
 })
 
-sender := taskqueue.NewCallbackSenderFromBroker(broker, "task-callbacks")
-
-consumer.Handle("create_vlan", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
+consumer.Handle("create_vlan", func(ctx context.Context, task *taskqueue.Task) error {
     var params struct {
         VlanID int `json:"vlan_id"`
     }
-    json.Unmarshal(payload.Params, &params)
+    json.Unmarshal(task.Payload, &params)
 
-    // 执行业务逻辑 ...
+    // 执行业务逻辑
+    // task.Reply / task.Metadata / trace 已自动恢复
 
-    sender.Success(ctx, payload.TaskID, map[string]any{"vlan_id": params.VlanID})
-    return &taskqueue.TaskResult{Message: "vlan created"}, nil
+    return nil
 })
 
 consumer.Start(context.Background())
 ```
 
-**编排侧：消费 Callback 驱动状态机**
+**Reply：按业务协议回发结果**
 
 ```go
-callbackConsumer.Handle("task_callback", func(ctx context.Context, payload *taskqueue.TaskPayload) (*taskqueue.TaskResult, error) {
-    var cb taskqueue.CallbackPayload
-    json.Unmarshal(payload.Params, &cb)
-    engine.HandleCallback(ctx, &cb)
-    return &taskqueue.TaskResult{Message: "ok"}, nil
+consumer.Handle("create_vlan", func(ctx context.Context, task *taskqueue.Task) error {
+    if task.Reply != nil {
+        _, _ = broker.Publish(ctx, &taskqueue.Task{
+            Type:    "task_callback",
+            Payload: []byte(`{"ok":true}`),
+            Queue:   task.Reply.Queue,
+        })
+    }
+    return nil
 })
 ```
 
 #### 注意事项
 
-1. **Callback 队列必须被消费**：Orchestrator 侧必须消费 `CallbackQueue`，否则工作流永远停在 Running 状态。
-2. **Worker 内必须发送 Callback**：无论成功还是失败，Handler 都必须调用 `sender.Success` 或 `sender.Fail`。
-3. **TaskType 需一致**：`StepDefinition.TaskType` 与 `consumer.Handle(taskType, ...)` 注册的 key 必须完全一致。
-4. **Broker 实现可替换**：将 `asynqbroker.NewBroker(...)` 替换为 `rocketmqbroker.NewBroker(...)` 即可切换消息队列。
+1. **当前仓库只保留 `asynqbroker`**：RocketMQ 已移除，切换 broker 不再是文档承诺能力。
+2. **Reply 只描述回发目标队列**：回发消息体格式仍由业务约定。
+3. **TaskType 需一致**：`Task.Type` 与 `consumer.Handle(taskType, ...)` 的注册 key 必须完全一致。
+4. **Priority 不自动路由**：实际优先级由 `Task.Queue` 和消费端 `Queues` 权重共同决定。
 
-#### 队列路由
+#### Asynq 适配行为
 
-`DefaultQueueRouter` 的路由规则（QueueTag + Priority → 队列名）：
+以下场景下，`asynqbroker.Broker.Publish` 会自动封装内部 envelope：
 
-| QueueTag | Priority | 队列名 |
-|----------|----------|--------|
-| `""` | Normal | `tasks` |
-| `""` | High | `tasks_high` |
-| `""` | Critical | `tasks_critical` |
-| `""` | Low | `tasks_low` |
-| `"huawei"` | Normal | `tasks_huawei` |
-| `"huawei"` | High | `tasks_huawei_high` |
-| `"huawei"` | Low | `tasks_huawei_low` |
-| `"cisco"` | Critical | `tasks_cisco_critical` |
+- `ctx` 中存在 `trace.TraceContext`
+- `task.Reply != nil`
+- `len(task.Metadata) > 0`
 
-自定义路由：
+内部 envelope 字段包括：
 
-```go
-engine, _ := taskqueue.NewEngine(&taskqueue.Config{
-    DSN: "...",
-    QueueRouter: func(queueTag string, priority taskqueue.Priority) string {
-        return fmt.Sprintf("my_queue_%s_%d", queueTag, priority)
-    },
-}, broker)
-```
+- `_v`
+- `_tid`
+- `_sid`
+- `_smpl`
+- `_rto`
+- `_meta`
+- `payload`
 
-#### 数据库表结构
-
-```sql
-CREATE TABLE IF NOT EXISTS workflows (
-    id              VARCHAR(64)  PRIMARY KEY,
-    name            VARCHAR(128) NOT NULL,
-    resource_type   VARCHAR(64)  NOT NULL,
-    resource_id     VARCHAR(128) NOT NULL,
-    status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
-    total_steps     INT          NOT NULL DEFAULT 0,
-    completed_steps INT          NOT NULL DEFAULT 0,
-    failed_steps    INT          NOT NULL DEFAULT 0,
-    error_message   TEXT,
-    metadata        JSONB,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_workflows_status   ON workflows(status);
-CREATE INDEX IF NOT EXISTS idx_workflows_resource ON workflows(resource_type, resource_id);
-
-CREATE TABLE IF NOT EXISTS step_tasks (
-    id              VARCHAR(64)  PRIMARY KEY,
-    workflow_id     VARCHAR(64)  NOT NULL REFERENCES workflows(id),
-    step_order      INT          NOT NULL,
-    task_type       VARCHAR(128) NOT NULL,
-    task_name       VARCHAR(256),
-    params          TEXT,
-    status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
-    priority        INT          NOT NULL DEFAULT 3,
-    queue_tag       VARCHAR(64),
-    broker_task_id  VARCHAR(128),
-    result          TEXT,
-    error_message   TEXT,
-    retry_count     INT          NOT NULL DEFAULT 0,
-    max_retries     INT          NOT NULL DEFAULT 3,
-    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    queued_at       TIMESTAMPTZ,
-    started_at      TIMESTAMPTZ,
-    completed_at    TIMESTAMPTZ,
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_step_tasks_workflow ON step_tasks(workflow_id, step_order);
-CREATE INDEX IF NOT EXISTS idx_step_tasks_status   ON step_tasks(status);
-```
+消费端会自动解包并恢复 trace、reply 和 metadata，因此 handler 拿到的是完整的 `*taskqueue.Task`。
 
 ---
 
@@ -1545,12 +1485,12 @@ A：检查：
 
 ---
 
-**Q：TaskQueue 的 Workflow 一直处于 Running 状态，步骤不推进？**
+**Q：TaskQueue 消费端拿到的 payload 不是业务原文，或者 trace / metadata / reply 丢失了？**
 
-A：最常见原因是编排侧没有消费 `CallbackQueue`。需要确认：
-1. 编排侧已注册并启动对 `CallbackQueue` 的消费
-2. Worker 侧 Handler 内确实调用了 `sender.Success` 或 `sender.Fail`
-3. Broker（Redis / RocketMQ）连接正常，消息未积压
+A：检查：
+1. 生产侧是否通过 `taskqueue.Broker` 发布任务，而不是绕过适配层直接写入 Asynq 原生 payload
+2. 业务方是否把 `_v`、`_tid`、`_meta`、`_rto` 当成业务字段自行解析或覆盖
+3. 消费端是否使用 `Consumer.Handle(..., func(ctx context.Context, task *taskqueue.Task) error { ... })` 新签名，而不是旧的 `TaskPayload`/`TaskResult` 模型
 
 ---
 

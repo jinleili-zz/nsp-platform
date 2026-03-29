@@ -14,7 +14,7 @@ go get github.com/jinleili-zz/nsp-platform
 |------|----------|------|
 | auth | `github.com/jinleili-zz/nsp-platform/auth` | AK/SK 认证 |
 | saga | `github.com/jinleili-zz/nsp-platform/saga` | SAGA 分布式事务 |
-| taskqueue | `github.com/jinleili-zz/nsp-platform/taskqueue` | 任务队列编排 |
+| taskqueue | `github.com/jinleili-zz/nsp-platform/taskqueue` | 异步任务队列 Broker 抽象 |
 | logger | `github.com/jinleili-zz/nsp-platform/logger` | 统一日志 |
 | trace | `github.com/jinleili-zz/nsp-platform/trace` | 分布式链路追踪 |
 | lock | `github.com/jinleili-zz/nsp-platform/lock` | 分布式锁 |
@@ -72,9 +72,8 @@ func main() {
 nsp-platform/
 ├── auth/               # AK/SK 认证
 ├── saga/               # SAGA 分布式事务
-├── taskqueue/          # 任务队列编排
-│   ├── asynqbroker/    # Asynq 实现
-│   └── rocketmqbroker/ # RocketMQ 实现
+├── taskqueue/          # 异步任务队列 Broker 抽象
+│   └── asynqbroker/    # Asynq 实现
 ├── logger/             # 统一日志
 ├── trace/              # 分布式链路追踪
 ├── lock/               # 分布式锁
