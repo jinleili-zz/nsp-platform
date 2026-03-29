@@ -76,10 +76,13 @@ func main() {
 		mu.Lock()
 		if item, ok := pending[result.TaskID]; ok {
 			item.result = &result
+			mu.Unlock()
 			log.Printf("[Reply] task_id=%s result=%.2f", result.TaskID[:8], result.Result)
+			wg.Done()
+		} else {
+			mu.Unlock()
+			log.Printf("[Reply] ignored unknown task_id=%s", result.TaskID[:8])
 		}
-		mu.Unlock()
-		wg.Done()
 		return nil
 	})
 
@@ -116,15 +119,21 @@ func main() {
 			Reply:   &taskqueue.ReplySpec{Queue: replydemo.CalcResponseQueue},
 		}
 
-		info, err := broker.Publish(ctx, task)
-		if err != nil {
-			log.Fatalf("Failed to publish task: %v", err)
-		}
-
+		// Register in pending map and increment WaitGroup before Publish
+		// to prevent race if the reply arrives before we finish setup.
+		wg.Add(1)
 		mu.Lock()
 		pending[ct.TaskID] = &pendingItem{task: ct}
 		mu.Unlock()
-		wg.Add(1)
+
+		info, err := broker.Publish(ctx, task)
+		if err != nil {
+			mu.Lock()
+			delete(pending, ct.TaskID)
+			mu.Unlock()
+			wg.Done()
+			log.Fatalf("Failed to publish task: %v", err)
+		}
 
 		log.Printf("[Send] task_id=%s op=%s operands=%v broker_id=%s",
 			ct.TaskID[:8], ct.Operation, ct.Operands, info.BrokerTaskID)
