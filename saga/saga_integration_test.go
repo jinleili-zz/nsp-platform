@@ -5,7 +5,8 @@
 // use httptest mock services, and verify end-to-end behaviour.
 //
 // Run with:
-//   TEST_DSN="postgres://nsp_user:nsp_password@localhost:5432/saga_test?sslmode=disable" go test -v -run TestIntegration -count=1 -timeout 300s ./pkg/saga/
+//
+//	TEST_DSN="postgres://nsp_user:nsp_password@localhost:5432/saga_test?sslmode=disable" go test -v -run TestIntegration -count=1 -timeout 300s ./pkg/saga/
 package saga
 
 import (

@@ -3,9 +3,11 @@ package asynqbroker
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
@@ -13,11 +15,48 @@ func TestWrapWithTrace_NoTraceInContext(t *testing.T) {
 	payload := []byte(`{"task_id":"t1","resource_id":"r1"}`)
 	ctx := context.Background()
 
-	result := wrapWithTrace(ctx, payload)
+	result := wrapWithTrace(ctx, payload, nil, nil)
 
 	// Without trace, payload should be returned as-is.
 	if string(result) != string(payload) {
 		t.Errorf("expected original payload, got %s", result)
+	}
+}
+
+func TestWrapWithTrace_WithReplyOnly(t *testing.T) {
+	payload := []byte(`{"task":"reply"}`)
+
+	result := wrapWithTrace(context.Background(), payload, &taskqueue.ReplySpec{Queue: "callback-q"}, nil)
+
+	var env taskEnvelope
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if env.ReplyTo == nil {
+		t.Fatal("expected reply envelope field")
+	}
+
+	var reply taskqueue.ReplySpec
+	if err := json.Unmarshal(*env.ReplyTo, &reply); err != nil {
+		t.Fatalf("failed to unmarshal reply: %v", err)
+	}
+	if reply.Queue != "callback-q" {
+		t.Fatalf("unexpected reply queue: %s", reply.Queue)
+	}
+}
+
+func TestWrapWithTrace_WithMetadataOnly(t *testing.T) {
+	payload := []byte(`{"task":"meta"}`)
+	metadata := map[string]string{"tenant": "acme"}
+
+	result := wrapWithTrace(context.Background(), payload, nil, metadata)
+
+	var env taskEnvelope
+	if err := json.Unmarshal(result, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !reflect.DeepEqual(env.Meta, metadata) {
+		t.Fatalf("unexpected metadata: %#v", env.Meta)
 	}
 }
 
@@ -32,7 +71,7 @@ func TestWrapWithTrace_WithTraceInContext(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	result := wrapWithTrace(ctx, payload)
+	result := wrapWithTrace(ctx, payload, nil, nil)
 
 	// Should be an envelope.
 	var env taskEnvelope
@@ -66,7 +105,7 @@ func TestWrapWithTrace_SampledFalse(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	result := wrapWithTrace(ctx, payload)
+	result := wrapWithTrace(ctx, payload, nil, nil)
 
 	var env taskEnvelope
 	if err := json.Unmarshal(result, &env); err != nil {
@@ -87,22 +126,28 @@ func TestUnwrapEnvelope_ValidEnvelope(t *testing.T) {
 		Payload: original,
 	})
 
-	payload, metadata := unwrapEnvelope(envelope)
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(envelope)
 
 	if string(payload) != string(original) {
 		t.Errorf("expected original payload, got %s", payload)
 	}
-	if metadata == nil {
+	if traceMeta == nil {
 		t.Fatal("expected non-nil metadata")
 	}
-	if metadata["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
-		t.Errorf("unexpected trace_id: %s", metadata["trace_id"])
+	if traceMeta["trace_id"] != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("unexpected trace_id: %s", traceMeta["trace_id"])
 	}
-	if metadata["span_id"] != "00f067aa0ba902b7" {
-		t.Errorf("unexpected span_id: %s", metadata["span_id"])
+	if traceMeta["span_id"] != "00f067aa0ba902b7" {
+		t.Errorf("unexpected span_id: %s", traceMeta["span_id"])
 	}
-	if metadata["sampled"] != "1" {
-		t.Errorf("expected sampled=1, got %s", metadata["sampled"])
+	if traceMeta["sampled"] != "1" {
+		t.Errorf("expected sampled=1, got %s", traceMeta["sampled"])
+	}
+	if reply != nil {
+		t.Fatalf("expected nil reply, got %#v", reply)
+	}
+	if len(businessMeta) != 0 {
+		t.Fatalf("expected empty business metadata, got %#v", businessMeta)
 	}
 }
 
@@ -116,10 +161,39 @@ func TestUnwrapEnvelope_SampledFalse(t *testing.T) {
 		Payload: original,
 	})
 
-	_, metadata := unwrapEnvelope(envelope)
+	_, traceMeta, _, _ := unwrapEnvelope(envelope)
 
-	if metadata["sampled"] != "0" {
-		t.Errorf("expected sampled=0, got %s", metadata["sampled"])
+	if traceMeta["sampled"] != "0" {
+		t.Errorf("expected sampled=0, got %s", traceMeta["sampled"])
+	}
+}
+
+func TestUnwrapEnvelope_WithReplyAndMetadata(t *testing.T) {
+	original := []byte(`{"task":"roundtrip"}`)
+	replyJSON := json.RawMessage(`{"queue":"callback-q"}`)
+	envelope, _ := json.Marshal(taskEnvelope{
+		Version: 1,
+		ReplyTo: &replyJSON,
+		Meta: map[string]string{
+			"tenant": "acme",
+			"region": "cn",
+		},
+		Payload: original,
+	})
+
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(envelope)
+
+	if string(payload) != string(original) {
+		t.Fatalf("unexpected payload: %s", payload)
+	}
+	if traceMeta != nil {
+		t.Fatalf("expected nil trace metadata, got %#v", traceMeta)
+	}
+	if reply == nil || reply.Queue != "callback-q" {
+		t.Fatalf("unexpected reply: %#v", reply)
+	}
+	if !reflect.DeepEqual(businessMeta, map[string]string{"tenant": "acme", "region": "cn"}) {
+		t.Fatalf("unexpected business metadata: %#v", businessMeta)
 	}
 }
 
@@ -127,26 +201,38 @@ func TestUnwrapEnvelope_LegacyPayload(t *testing.T) {
 	// Legacy payload without envelope wrapping.
 	legacy := []byte(`{"task_id":"t1","resource_id":"r1","task_params":"{}"}`)
 
-	payload, metadata := unwrapEnvelope(legacy)
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(legacy)
 
 	if string(payload) != string(legacy) {
 		t.Errorf("expected legacy payload returned as-is, got %s", payload)
 	}
-	if metadata != nil {
-		t.Errorf("expected nil metadata for legacy payload, got %v", metadata)
+	if traceMeta != nil {
+		t.Errorf("expected nil trace metadata for legacy payload, got %v", traceMeta)
+	}
+	if reply != nil {
+		t.Errorf("expected nil reply for legacy payload, got %#v", reply)
+	}
+	if len(businessMeta) != 0 {
+		t.Errorf("expected empty business metadata for legacy payload, got %#v", businessMeta)
 	}
 }
 
 func TestUnwrapEnvelope_InvalidJSON(t *testing.T) {
 	garbage := []byte(`not json at all`)
 
-	payload, metadata := unwrapEnvelope(garbage)
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(garbage)
 
 	if string(payload) != string(garbage) {
 		t.Errorf("expected garbage returned as-is, got %s", payload)
 	}
-	if metadata != nil {
-		t.Errorf("expected nil metadata for garbage, got %v", metadata)
+	if traceMeta != nil {
+		t.Errorf("expected nil trace metadata for garbage, got %v", traceMeta)
+	}
+	if reply != nil {
+		t.Errorf("expected nil reply for garbage, got %#v", reply)
+	}
+	if len(businessMeta) != 0 {
+		t.Errorf("expected empty business metadata for garbage, got %#v", businessMeta)
 	}
 }
 
@@ -156,13 +242,19 @@ func TestUnwrapEnvelope_WrongVersion(t *testing.T) {
 		"payload": "some data",
 	})
 
-	payload, metadata := unwrapEnvelope(data)
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(data)
 
 	if string(payload) != string(data) {
 		t.Errorf("expected original data returned for wrong version, got %s", payload)
 	}
-	if metadata != nil {
-		t.Errorf("expected nil metadata for wrong version, got %v", metadata)
+	if traceMeta != nil {
+		t.Errorf("expected nil trace metadata for wrong version, got %v", traceMeta)
+	}
+	if reply != nil {
+		t.Errorf("expected nil reply for wrong version, got %#v", reply)
+	}
+	if len(businessMeta) != 0 {
+		t.Errorf("expected empty business metadata for wrong version, got %#v", businessMeta)
 	}
 }
 
@@ -177,17 +269,25 @@ func TestRoundTrip_WrapAndUnwrap(t *testing.T) {
 	}
 	ctx := trace.ContextWithTrace(context.Background(), tc)
 
-	wrapped := wrapWithTrace(ctx, original)
-	payload, metadata := unwrapEnvelope(wrapped)
+	replySpec := &taskqueue.ReplySpec{Queue: "callback-q"}
+	metadata := map[string]string{"tenant": "acme"}
+	wrapped := wrapWithTrace(ctx, original, replySpec, metadata)
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(wrapped)
 
 	if string(payload) != string(original) {
 		t.Errorf("round-trip payload mismatch: got %s", payload)
 	}
-	if metadata["trace_id"] != tc.TraceID {
-		t.Errorf("round-trip trace_id mismatch: got %s", metadata["trace_id"])
+	if traceMeta["trace_id"] != tc.TraceID {
+		t.Errorf("round-trip trace_id mismatch: got %s", traceMeta["trace_id"])
 	}
-	if metadata["span_id"] != tc.SpanId {
-		t.Errorf("round-trip span_id mismatch: got %s", metadata["span_id"])
+	if traceMeta["span_id"] != tc.SpanId {
+		t.Errorf("round-trip span_id mismatch: got %s", traceMeta["span_id"])
+	}
+	if reply == nil || reply.Queue != replySpec.Queue {
+		t.Fatalf("round-trip reply mismatch: %#v", reply)
+	}
+	if !reflect.DeepEqual(businessMeta, metadata) {
+		t.Fatalf("round-trip metadata mismatch: %#v", businessMeta)
 	}
 }
 

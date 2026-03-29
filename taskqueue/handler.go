@@ -3,5 +3,5 @@ package taskqueue
 import "context"
 
 // HandlerFunc is the function signature for task handlers.
-// It receives a decoded TaskPayload and returns a TaskResult on success.
-type HandlerFunc func(ctx context.Context, payload *TaskPayload) (*TaskResult, error)
+// It receives the full broker-level task and returns an error if handling fails.
+type HandlerFunc func(ctx context.Context, task *Task) error
