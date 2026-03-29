@@ -7,199 +7,281 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/internal/config"
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+
+	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/store"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
+	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
-// TaskProducer sends tasks to the configured broker.
-type TaskProducer struct {
-	broker    taskqueue.Broker
-	config    *config.Config
-	inspector taskqueue.Inspector
+type callbackMessage struct {
+	TaskID       string          `json:"task_id"`
+	Status       string          `json:"status"`
+	Result       json.RawMessage `json:"result,omitempty"`
+	ErrorMessage string          `json:"error_message,omitempty"`
 }
 
-// NewTaskProducer creates a new producer.
-func NewTaskProducer(cfg *config.Config) (*TaskProducer, error) {
-	redisOpt := cfg.RedisConnOpt()
-	return &TaskProducer{
-		broker:    asynqbroker.NewBroker(redisOpt),
-		config:    cfg,
-		inspector: asynqbroker.NewInspector(redisOpt),
-	}, nil
+// TaskManager manages task lifecycle using broker for message delivery.
+type TaskManager struct {
+	store  *store.TaskStore
+	broker *asynqbroker.Broker
 }
 
-// Close closes producer resources.
-func (p *TaskProducer) Close() error {
-	if p.broker != nil {
-		_ = p.broker.Close()
+// NewTaskManager creates a new TaskManager.
+func NewTaskManager(s *store.TaskStore, b *asynqbroker.Broker) *TaskManager {
+	return &TaskManager{store: s, broker: b}
+}
+
+// SubmitTask submits a new task using the default queue.
+func (m *TaskManager) SubmitTask(ctx context.Context, name, taskType, payload string, maxRetries int, callbackQueue string) (string, error) {
+	return m.SubmitTaskWithPriority(ctx, name, taskType, payload, maxRetries, store.DefaultQueue, callbackQueue)
+}
+
+// SubmitTaskWithPriority submits a new task to the given queue with a specified callback queue.
+func (m *TaskManager) SubmitTaskWithPriority(ctx context.Context, name, taskType, payload string, maxRetries int, queue string, callbackQueue string) (string, error) {
+	taskID := uuid.New().String()
+	now := time.Now()
+
+	record := &store.Task{
+		ID:         taskID,
+		Name:       name,
+		Type:       taskType,
+		Queue:      queue,
+		Payload:    payload,
+		Status:     store.TaskStatusPending,
+		MaxRetries: maxRetries,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
-	if p.inspector != nil {
-		_ = p.inspector.Close()
+	if err := m.store.Create(ctx, record); err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
 	}
-	return nil
-}
 
-// SendTask sends a task to the queue matching the given priority.
-func (p *TaskProducer) SendTask(ctx context.Context, taskType string, params map[string]interface{}, priority string) (*taskqueue.TaskInfo, error) {
-	return p.send(ctx, taskType, params, priority, "")
-}
+	msg := &taskqueue.Task{
+		Type:    taskType,
+		Payload: []byte(payload),
+		Queue:   queue,
+		Reply:   &taskqueue.ReplySpec{Queue: callbackQueue},
+		Metadata: map[string]string{
+			"task_id": taskID,
+		},
+	}
 
-// SendTaskWithTimeout sends a task and records a timeout hint in metadata.
-func (p *TaskProducer) SendTaskWithTimeout(ctx context.Context, taskType string, params map[string]interface{}, priority string, timeout time.Duration) (*taskqueue.TaskInfo, error) {
-	return p.send(ctx, taskType, params, priority, timeout.String())
-}
-
-func (p *TaskProducer) send(ctx context.Context, taskType string, params map[string]interface{}, priority string, timeout string) (*taskqueue.TaskInfo, error) {
-	payloadBytes, err := json.Marshal(params)
+	info, err := m.broker.Publish(ctx, msg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+		_ = m.store.UpdateStatus(ctx, taskID, store.TaskStatusFailed, err.Error())
+		return "", fmt.Errorf("failed to publish task: %w", err)
 	}
 
-	metadata := map[string]string{
-		"producer_id": p.config.InstanceID,
-		"priority":    priority,
-		"send_time":   time.Now().Format(time.RFC3339),
-	}
-	if timeout != "" {
-		metadata["timeout"] = timeout
-	}
+	_ = m.store.UpdateBrokerTaskID(ctx, taskID, info.BrokerTaskID)
+	_ = m.store.UpdateStatus(ctx, taskID, store.TaskStatusRunning, "")
 
-	task := &taskqueue.Task{
-		Type:     taskType,
-		Payload:  payloadBytes,
-		Queue:    config.GetQueueByPriority(priority),
-		Priority: getPriorityValue(priority),
-		Metadata: metadata,
-	}
-
-	info, err := p.broker.Publish(ctx, task)
-	if err != nil {
-		return nil, fmt.Errorf("failed to publish task: %w", err)
-	}
-
-	log.Printf("[Producer] Task sent: type=%s queue=%s priority=%s task_id=%s",
-		taskType, task.Queue, priority, info.BrokerTaskID)
-	return info, nil
+	log.Printf("[Producer] Task submitted: id=%s, type=%s, queue=%s, callback=%s, broker_id=%s | trace_id=%s",
+		taskID, taskType, queue, callbackQueue, info.BrokerTaskID, getTraceID(ctx))
+	return taskID, nil
 }
 
-// GetQueueStats prints queue statistics.
-func (p *TaskProducer) GetQueueStats() error {
-	queues := []string{config.QueueTaskHigh, config.QueueTaskMedium, config.QueueTaskLow, config.QueueResultCallback}
-	ctx := context.Background()
+// HandleCallback updates local task state from worker replies.
+func (m *TaskManager) HandleCallback(ctx context.Context, cb *callbackMessage) error {
+	tc := trace.MustTraceFromContext(ctx)
+	log.Printf("[Producer] Callback received: task_id=%s, status=%s | trace_id=%s",
+		cb.TaskID, cb.Status, tc.TraceID)
 
-	fmt.Println("\n========== Queue Statistics ==========")
-	for _, queue := range queues {
-		stats, err := p.inspector.GetQueueStats(ctx, queue)
-		if err != nil {
-			fmt.Printf("Queue: %-40s | Error: %v\n", queue, err)
-			continue
+	task, err := m.store.GetByID(ctx, cb.TaskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task not found: %s", cb.TaskID)
+	}
+
+	switch cb.Status {
+	case "completed":
+		return m.store.UpdateResult(ctx, cb.TaskID, store.TaskStatusCompleted, string(cb.Result))
+	case "failed":
+		if task.RetryCount < task.MaxRetries {
+			_ = m.store.IncrementRetry(ctx, cb.TaskID)
+			_ = m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusPending, cb.ErrorMessage)
+
+			// Determine callback queue from original task metadata
+			callbackQueue := ""
+			if task.Type == "send:payment:notification" || task.Type == "deduct:inventory" ||
+				task.Type == "generate:report" || task.Type == "export:data" {
+				callbackQueue = store.CallbackQueueOrder
+			} else {
+				callbackQueue = store.CallbackQueueNotify
+			}
+
+			info, err := m.broker.Publish(ctx, &taskqueue.Task{
+				Type:    task.Type,
+				Payload: []byte(task.Payload),
+				Queue:   task.Queue,
+				Reply:   &taskqueue.ReplySpec{Queue: callbackQueue},
+				Metadata: map[string]string{
+					"task_id": task.ID,
+				},
+			})
+			if err != nil {
+				_ = m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusFailed, err.Error())
+				return fmt.Errorf("failed to re-publish task: %w", err)
+			}
+
+			_ = m.store.UpdateBrokerTaskID(ctx, cb.TaskID, info.BrokerTaskID)
+			_ = m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusRunning, "")
+			log.Printf("[Producer] Task re-queued for retry: id=%s, retry=%d/%d | trace_id=%s",
+				cb.TaskID, task.RetryCount+1, task.MaxRetries, tc.TraceID)
+			return nil
 		}
-		fmt.Printf("Queue: %-40s | Pending: %3d | Active: %3d | Completed: %3d | Failed: %3d\n",
-			queue, stats.Pending, stats.Active, stats.Completed, stats.Failed)
-	}
-	fmt.Println("======================================")
-	return nil
-}
-
-func getPriorityValue(priority string) taskqueue.Priority {
-	switch priority {
-	case "high":
-		return taskqueue.PriorityHigh
-	case "medium":
-		return taskqueue.PriorityNormal
-	case "low":
-		return taskqueue.PriorityLow
+		return m.store.UpdateStatus(ctx, cb.TaskID, store.TaskStatusFailed, cb.ErrorMessage)
 	default:
-		return taskqueue.PriorityNormal
+		return fmt.Errorf("unknown callback status: %s", cb.Status)
 	}
 }
 
-func simulateTaskSending(producer *TaskProducer) {
-	ctx := context.Background()
+// QueryTask returns task status.
+func (m *TaskManager) QueryTask(ctx context.Context, taskID string) (*store.Task, error) {
+	return m.store.GetByID(ctx, taskID)
+}
 
-	for i := 1; i <= 3; i++ {
-		_, err := producer.SendTask(ctx, config.TaskTypeEmailSend, map[string]interface{}{
-			"to":      fmt.Sprintf("user%d@example.com", i),
-			"subject": fmt.Sprintf("High Priority Email #%d", i),
-			"body":    "This is a high priority email",
-		}, "high")
-		if err != nil {
-			log.Printf("Failed to send high priority task: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+// ListTasks returns all tasks with the given status.
+func (m *TaskManager) ListTasks(ctx context.Context, status string) ([]*store.Task, error) {
+	return m.store.ListByStatus(ctx, status)
+}
 
-	for i := 1; i <= 5; i++ {
-		_, err := producer.SendTask(ctx, config.TaskTypeImageProcess, map[string]interface{}{
-			"image_url": fmt.Sprintf("https://example.com/images/img%d.jpg", i),
-			"operation": "resize",
-			"width":     800,
-			"height":    600,
-		}, "medium")
-		if err != nil {
-			log.Printf("Failed to send medium priority task: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+// Close closes resources.
+func (m *TaskManager) Close() error {
+	return m.store.Close()
+}
 
-	for i := 1; i <= 3; i++ {
-		_, err := producer.SendTask(ctx, config.TaskTypeDataExport, map[string]interface{}{
-			"format":    "csv",
-			"date_from": "2024-01-01",
-			"date_to":   "2024-12-31",
-			"user_id":   fmt.Sprintf("user_%d", i),
-		}, "low")
-		if err != nil {
-			log.Printf("Failed to send low priority task: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
+func getTraceID(ctx context.Context) string {
+	tc, ok := trace.TraceFromContext(ctx)
+	if ok && tc != nil {
+		return tc.TraceID
 	}
-
-	_, err := producer.SendTaskWithTimeout(ctx, config.TaskTypeReportGenerate, map[string]interface{}{
-		"report_type": "monthly",
-		"month":       "2024-12",
-		"department":  "sales",
-	}, "high", 60*time.Second)
-	if err != nil {
-		log.Printf("Failed to send timeout task: %v", err)
-	}
+	return ""
 }
 
 func main() {
-	log.Println("[Producer] Starting TaskQueue Priority Demo Producer...")
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	cfg := config.DefaultConfig()
-	log.Printf("[Producer] Config: redis=%s instance_id=%s", strings.Join(cfg.RedisAddrs, ","), cfg.InstanceID)
+	instanceID := trace.GetInstanceId()
+	log.Printf("[Producer] Instance ID: %s", instanceID)
 
-	producer, err := NewTaskProducer(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rootTC := &trace.TraceContext{
+		TraceID:    trace.NewTraceID(),
+		SpanId:     trace.NewSpanId(),
+		InstanceId: instanceID,
+		Sampled:    true,
+	}
+	ctx = trace.ContextWithTrace(ctx, rootTC)
+	ctx = logger.ContextWithTraceID(ctx, rootTC.TraceID)
+	ctx = logger.ContextWithSpanID(ctx, rootTC.SpanId)
+
+	redisOpt := asynq.RedisClientOpt{Addr: store.MustRedisAddr()}
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
+
+	taskStore, err := store.NewTaskStore()
 	if err != nil {
-		log.Fatalf("Failed to create producer: %v", err)
+		log.Fatalf("[Producer] Failed to create task store: %v", err)
 	}
-	defer producer.Close()
+	defer taskStore.Close()
 
-	simulateTaskSending(producer)
-	time.Sleep(500 * time.Millisecond)
-	_ = producer.GetQueueStats()
+	if err := taskStore.Migrate(ctx); err != nil {
+		log.Fatalf("[Producer] Failed to initialize task store: %v", err)
+	}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	manager := NewTaskManager(taskStore, broker)
 
-	log.Println("[Producer] Running... Press Ctrl+C to exit")
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	// Start dual callback consumers: one for order callbacks, one for notify callbacks
+	startCallbackConsumer := func(queueName, label string) {
+		cbConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+			Concurrency: 2,
+			Queues:      map[string]int{queueName: 10},
+		})
+		cbConsumer.Handle("broker_task_callback", func(ctx context.Context, task *taskqueue.Task) error {
+			var cb callbackMessage
+			if err := json.Unmarshal(task.Payload, &cb); err != nil {
+				return fmt.Errorf("failed to unmarshal callback: %w", err)
+			}
+			return manager.HandleCallback(ctx, &cb)
+		})
+		go func() {
+			if err := cbConsumer.Start(ctx); err != nil {
+				log.Printf("[Producer] %s callback consumer stopped: %v", label, err)
+			}
+		}()
+		log.Printf("[Producer] Started %s callback consumer on %s", label, queueName)
+	}
 
-	for {
-		select {
-		case <-ticker.C:
-			_ = producer.GetQueueStats()
-		case sig := <-sigChan:
-			log.Printf("[Producer] Received signal: %v, shutting down...", sig)
-			return
+	startCallbackConsumer(store.CallbackQueueOrder, "Order")
+	startCallbackConsumer(store.CallbackQueueNotify, "Notify")
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Submit tasks with priority and callback routing
+	submit := func(name, taskType, queue, callbackQueue string, payload map[string]interface{}) {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			log.Fatalf("[Producer] marshal %s failed: %v", taskType, err)
 		}
+		taskID, err := manager.SubmitTaskWithPriority(ctx, name, taskType, string(data), 3, queue, callbackQueue)
+		if err != nil {
+			log.Fatalf("[Producer] submit %s failed: %v", taskType, err)
+		}
+		log.Printf("[Producer] Submitted task %s (%s) -> %s", taskID, taskType, callbackQueue)
 	}
+
+	// 订单类任务 -> order callback queue
+	submit("Payment Notification", "send:payment:notification", store.TaskQueueHigh, store.CallbackQueueOrder, map[string]interface{}{
+		"payment_id": "PAY-001",
+		"amount":     999.00,
+		"user_id":    "U-001",
+	})
+	submit("Deduct Inventory", "deduct:inventory", store.TaskQueueHigh, store.CallbackQueueOrder, map[string]interface{}{
+		"sku_id": "SKU-001",
+		"count":  2,
+	})
+	submit("Generate Report", "generate:report", store.TaskQueueLow, store.CallbackQueueOrder, map[string]interface{}{
+		"report_type": "daily_sales",
+		"date":        "2024-01-01",
+	})
+	submit("Export Data", "export:data", store.TaskQueueLow, store.CallbackQueueOrder, map[string]interface{}{
+		"format":  "csv",
+		"user_id": "U-001",
+	})
+
+	// 通知类任务 -> notify callback queue
+	submit("Send Email", "send:email", store.TaskQueueMiddle, store.CallbackQueueNotify, map[string]interface{}{
+		"email":   "user@example.com",
+		"subject": "Welcome!",
+	})
+	submit("Send Notification", "send:notification", store.TaskQueueMiddle, store.CallbackQueueNotify, map[string]interface{}{
+		"channel":   "sms",
+		"recipient": "+1234567890",
+	})
+	submit("Process Image", "process:image", store.TaskQueueMiddle, store.CallbackQueueNotify, map[string]interface{}{
+		"image_url": "https://example.com/img.jpg",
+		"operation": "resize",
+	})
+
+	// Failing task for retry demo (order type)
+	submit("Always Fail", "always:fail", store.TaskQueueMiddle, store.CallbackQueueOrder, map[string]interface{}{
+		"reason": "retry-demo",
+	})
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	cancel()
 }

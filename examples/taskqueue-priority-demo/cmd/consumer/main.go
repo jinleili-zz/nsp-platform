@@ -2,112 +2,225 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/internal/config"
-	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/internal/handler"
+	"github.com/hibiken/asynq"
+
+	"github.com/jinleili-zz/nsp-platform/examples/taskqueue-priority-demo/store"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
-// TaskProcessor routes tasks to the configured handlers.
-type TaskProcessor struct {
-	handlers map[string]handler.TaskHandler
+type callbackMessage struct {
+	TaskID       string      `json:"task_id"`
+	Status       string      `json:"status"`
+	Result       interface{} `json:"result,omitempty"`
+	ErrorMessage string      `json:"error_message,omitempty"`
 }
 
-// NewTaskProcessor creates a task processor.
-func NewTaskProcessor() *TaskProcessor {
-	return &TaskProcessor{
-		handlers: map[string]handler.TaskHandler{
-			config.TaskTypeEmailSend:      handler.HandleEmailSend,
-			config.TaskTypeImageProcess:   handler.HandleImageProcess,
-			config.TaskTypeDataExport:     handler.HandleDataExport,
-			config.TaskTypeReportGenerate: handler.HandleReportGenerate,
-			config.TaskTypeNotification:   handler.HandleNotification,
-		},
-	}
+type CallbackSender struct {
+	broker *asynqbroker.Broker
 }
 
-// Process handles a single task.
-func (p *TaskProcessor) Process(ctx context.Context, task *taskqueue.Task) error {
-	tc := trace.MustTraceFromContext(ctx)
-
-	taskHandler, exists := p.handlers[task.Type]
-	if !exists {
-		return fmt.Errorf("unknown task type: %s", task.Type)
-	}
-
-	startTime := time.Now()
-	log.Printf("[Consumer] Processing task: type=%s queue=%s trace_id=%s",
-		task.Type, task.Queue, tc.TraceID)
-
-	if err := taskHandler(ctx, task); err != nil {
-		log.Printf("[Consumer] Task failed: type=%s err=%v trace_id=%s", task.Type, err, tc.TraceID)
-		return err
-	}
-
-	log.Printf("[Consumer] Task completed: type=%s duration=%v trace_id=%s",
-		task.Type, time.Since(startTime), tc.TraceID)
-	return nil
+func NewCallbackSender(broker *asynqbroker.Broker) *CallbackSender {
+	return &CallbackSender{broker: broker}
 }
 
-func createConsumer(cfg *config.Config, processor *TaskProcessor) taskqueue.Consumer {
-	consumer := asynqbroker.NewConsumer(cfg.RedisConnOpt(), asynqbroker.ConsumerConfig{
-		Concurrency: cfg.Concurrency,
-		Queues:      cfg.QueueWeights,
+func (s *CallbackSender) Success(ctx context.Context, task *taskqueue.Task, result interface{}) error {
+	return s.send(ctx, task, "completed", result, "")
+}
+
+func (s *CallbackSender) Fail(ctx context.Context, task *taskqueue.Task, errMsg string) error {
+	return s.send(ctx, task, "failed", nil, errMsg)
+}
+
+func (s *CallbackSender) send(ctx context.Context, task *taskqueue.Task, status string, result interface{}, errorMsg string) error {
+	if task.Reply == nil || task.Reply.Queue == "" {
+		return nil
+	}
+
+	cb := callbackMessage{
+		TaskID:       task.Metadata["task_id"],
+		Status:       status,
+		Result:       result,
+		ErrorMessage: errorMsg,
+	}
+	data, err := json.Marshal(cb)
+	if err != nil {
+		return fmt.Errorf("failed to marshal callback: %w", err)
+	}
+
+	_, err = s.broker.Publish(ctx, &taskqueue.Task{
+		Type:    "broker_task_callback",
+		Payload: data,
+		Queue:   task.Reply.Queue,
 	})
-
-	for taskType := range processor.handlers {
-		consumer.Handle(taskType, processor.Process)
-		log.Printf("[Consumer] Registered handler for task type: %s", taskType)
-	}
-	return consumer
+	return err
 }
 
-func printConsumerInfo(cfg *config.Config) {
-	fmt.Println("\n========== Consumer Configuration ==========")
-	fmt.Printf("Instance ID:     %s\n", cfg.InstanceID)
-	fmt.Printf("Redis Address:   %s\n", strings.Join(cfg.RedisAddrs, ","))
-	fmt.Printf("Concurrency:     %d\n", cfg.Concurrency)
-	fmt.Println("\nQueue Weights (Priority Order):")
-	fmt.Printf("  %-40s weight=%d\n", config.QueueTaskHigh, cfg.QueueWeights[config.QueueTaskHigh])
-	fmt.Printf("  %-40s weight=%d\n", config.QueueTaskMedium, cfg.QueueWeights[config.QueueTaskMedium])
-	fmt.Printf("  %-40s weight=%d\n", config.QueueTaskLow, cfg.QueueWeights[config.QueueTaskLow])
-	fmt.Println("============================================")
+func decodeTaskPayload(task *taskqueue.Task) (map[string]interface{}, error) {
+	var params map[string]interface{}
+	if err := json.Unmarshal(task.Payload, &params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }
 
 func main() {
-	log.Println("[Consumer] Starting TaskQueue Priority Demo Consumer...")
-
-	cfg := config.DefaultConfig()
-	printConsumerInfo(cfg)
-
-	processor := NewTaskProcessor()
-	consumer := createConsumer(cfg, processor)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	redisOpt := asynq.RedisClientOpt{Addr: store.MustRedisAddr()}
+	broker := asynqbroker.NewBroker(redisOpt)
+	defer broker.Close()
+
+	callbackSender := NewCallbackSender(broker)
+
+	workerConsumer := asynqbroker.NewConsumer(redisOpt, asynqbroker.ConsumerConfig{
+		Concurrency: 5,
+		Queues: map[string]int{
+			store.TaskQueueHigh:   30,
+			store.TaskQueueMiddle: 20,
+			store.TaskQueueLow:    10,
+		},
+	})
+
+	// 订单类任务 handler
+	workerConsumer.Handle("send:payment:notification", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [HIGH] payment notification: task_id=%s payment_id=%v trace_id=%s",
+			task.Metadata["task_id"], params["payment_id"], tc.TraceID)
+		time.Sleep(200 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message":    "Payment notification sent",
+			"payment_id": params["payment_id"],
+		})
+	})
+
+	workerConsumer.Handle("deduct:inventory", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [HIGH] deduct inventory: task_id=%s sku=%v trace_id=%s",
+			task.Metadata["task_id"], params["sku_id"], tc.TraceID)
+		time.Sleep(150 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message": "Inventory deducted",
+			"sku_id":  params["sku_id"],
+			"count":   params["count"],
+		})
+	})
+
+	// 通知类任务 handler
+	workerConsumer.Handle("send:email", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [MIDDLE] send email: task_id=%s email=%v trace_id=%s",
+			task.Metadata["task_id"], params["email"], tc.TraceID)
+		time.Sleep(500 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message": "Email sent successfully",
+			"email":   params["email"],
+		})
+	})
+
+	workerConsumer.Handle("send:notification", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [MIDDLE] send notification: task_id=%s channel=%v trace_id=%s",
+			task.Metadata["task_id"], params["channel"], tc.TraceID)
+		time.Sleep(100 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message":   "Notification sent",
+			"channel":   params["channel"],
+			"recipient": params["recipient"],
+		})
+	})
+
+	workerConsumer.Handle("process:image", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [MIDDLE] process image: task_id=%s image=%v trace_id=%s",
+			task.Metadata["task_id"], params["image_url"], tc.TraceID)
+		time.Sleep(800 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message":    "Image processed",
+			"image_url":  params["image_url"],
+			"operation":  params["operation"],
+		})
+	})
+
+	workerConsumer.Handle("generate:report", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [LOW] generate report: task_id=%s report=%v trace_id=%s",
+			task.Metadata["task_id"], params["report_type"], tc.TraceID)
+		time.Sleep(600 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message":   "Report generated",
+			"report_id": "RPT-67890",
+		})
+	})
+
+	workerConsumer.Handle("export:data", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		params, err := decodeTaskPayload(task)
+		if err != nil {
+			return err
+		}
+		log.Printf("[Consumer] [LOW] export data: task_id=%s format=%v trace_id=%s",
+			task.Metadata["task_id"], params["format"], tc.TraceID)
+		time.Sleep(700 * time.Millisecond)
+		return callbackSender.Success(ctx, task, map[string]any{
+			"message": "Data exported",
+			"format":  params["format"],
+		})
+	})
+
+	workerConsumer.Handle("always:fail", func(ctx context.Context, task *taskqueue.Task) error {
+		tc := trace.MustTraceFromContext(ctx)
+		log.Printf("[Consumer] [MIDDLE] always fail: task_id=%s trace_id=%s",
+			task.Metadata["task_id"], tc.TraceID)
+		return callbackSender.Fail(ctx, task, "Simulated failure for retry test")
+	})
 
 	go func() {
-		log.Printf("[Consumer] Starting with concurrency=%d...", cfg.Concurrency)
-		if err := consumer.Start(ctx); err != nil {
-			log.Printf("[Consumer] Error: %v", err)
+		if err := workerConsumer.Start(ctx); err != nil {
+			log.Printf("[Consumer] worker stopped: %v", err)
 		}
 	}()
 
-	log.Println("[Consumer] Running... Press Ctrl+C to exit")
-	<-sigChan
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	log.Println("[Consumer] Shutting down gracefully...")
-	_ = consumer.Stop()
+	_ = workerConsumer.Stop()
+	cancel()
 }
