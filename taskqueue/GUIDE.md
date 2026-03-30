@@ -36,7 +36,7 @@ type Task struct {
 
 - `Payload` 直接放业务 JSON
 - `Queue` 由业务自己决定
-- `Reply` 为 `nil` 时表示不需要回调
+- `Reply` 为 `nil` 时表示 producer 不指定回复队列，由 consumer 按业务约定自行选择回复队列
 - `Priority` 是保留字段，不会自动映射成队列
 
 ## 发布任务
