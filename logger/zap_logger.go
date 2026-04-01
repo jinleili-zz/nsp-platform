@@ -462,6 +462,11 @@ func (l *zapLogger) WithContext(ctx context.Context) Logger {
 	return l.With(ctxFields...)
 }
 
+// Sugar implements Logger.
+func (l *zapLogger) Sugar() SugaredLogger {
+	return &zapSugaredLogger{slogger: l.zlogger.Sugar()}
+}
+
 // Sync implements Logger.
 func (l *zapLogger) Sync() error {
 	// Sync zap logger first

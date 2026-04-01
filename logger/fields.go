@@ -119,6 +119,6 @@ const (
 
 // Log category field constant.
 const (
-	// FieldCategory is the log category (access, platform, business)
+	// FieldCategory is the log category (access, platform, business).
 	FieldCategory = "category"
 )
