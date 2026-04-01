@@ -86,6 +86,9 @@ type Logger interface {
 	// This is a convenience method that combines extracting trace fields and creating a child logger.
 	WithContext(ctx context.Context) Logger
 
+	// Sugar returns a printf-style logging view backed by the same logger configuration.
+	Sugar() SugaredLogger
+
 	// Sync flushes any buffered log entries.
 	// This should be called before program exit to ensure all logs are written.
 	Sync() error
@@ -206,6 +209,31 @@ func Fatal(msg string, args ...any) {
 	GetLogger().Fatal(msg, args...)
 }
 
+// Debugf logs a formatted message at debug level using the global logger.
+func Debugf(format string, args ...any) {
+	GetLogger().Sugar().Debugf(format, args...)
+}
+
+// Infof logs a formatted message at info level using the global logger.
+func Infof(format string, args ...any) {
+	GetLogger().Sugar().Infof(format, args...)
+}
+
+// Warnf logs a formatted message at warn level using the global logger.
+func Warnf(format string, args ...any) {
+	GetLogger().Sugar().Warnf(format, args...)
+}
+
+// Errorf logs a formatted message at error level using the global logger.
+func Errorf(format string, args ...any) {
+	GetLogger().Sugar().Errorf(format, args...)
+}
+
+// Fatalf logs a formatted message at error level using the global logger and exits.
+func Fatalf(format string, args ...any) {
+	GetLogger().Sugar().Fatalf(format, args...)
+}
+
 // DebugContext logs a message at debug level with context using the global logger.
 func DebugContext(ctx context.Context, msg string, args ...any) {
 	GetLogger().DebugContext(ctx, msg, args...)
@@ -224,6 +252,26 @@ func WarnContext(ctx context.Context, msg string, args ...any) {
 // ErrorContext logs a message at error level with context using the global logger.
 func ErrorContext(ctx context.Context, msg string, args ...any) {
 	GetLogger().ErrorContext(ctx, msg, args...)
+}
+
+// DebugContextf logs a formatted message at debug level with context using the global logger.
+func DebugContextf(ctx context.Context, format string, args ...any) {
+	GetLogger().Sugar().DebugContextf(ctx, format, args...)
+}
+
+// InfoContextf logs a formatted message at info level with context using the global logger.
+func InfoContextf(ctx context.Context, format string, args ...any) {
+	GetLogger().Sugar().InfoContextf(ctx, format, args...)
+}
+
+// WarnContextf logs a formatted message at warn level with context using the global logger.
+func WarnContextf(ctx context.Context, format string, args ...any) {
+	GetLogger().Sugar().WarnContextf(ctx, format, args...)
+}
+
+// ErrorContextf logs a formatted message at error level with context using the global logger.
+func ErrorContextf(ctx context.Context, format string, args ...any) {
+	GetLogger().Sugar().ErrorContextf(ctx, format, args...)
 }
 
 // With returns a new Logger with the given fields attached using the global logger.
