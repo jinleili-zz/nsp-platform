@@ -22,14 +22,15 @@ package lock
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/go-redsync/redsync/v4"
+	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -288,6 +289,87 @@ func TestAcquire_CtxTimeout(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Option validation
 // ─────────────────────────────────────────────────────────────────────────────
+
+// TestNewRedisClient_UsernameField verifies that Redis ACL credentials are
+// propagated into the underlying cluster client options.
+func TestNewRedisClient_UsernameField(t *testing.T) {
+	opt, err := newClusterOptions(RedisOption{
+		Addrs:    []string{"127.0.0.1:6379"},
+		Username: "svc-lock",
+		Password: "secret",
+	})
+	if err != nil {
+		t.Fatalf("newClusterOptions() error = %v", err)
+	}
+
+	if got := opt.Username; got != "svc-lock" {
+		t.Fatalf("ClusterOptions.Username = %q, want %q", got, "svc-lock")
+	}
+	if got := opt.Password; got != "secret" {
+		t.Fatalf("ClusterOptions.Password = %q, want %q", got, "secret")
+	}
+}
+
+// TestNewStandaloneRedisClient_UsernameField verifies that ACL credentials are
+// passed through to the standalone go-redis client and accepted by Redis.
+func TestNewStandaloneRedisClient_UsernameField(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth("svc-lock", "secret")
+
+	client, err := NewStandaloneRedisClient(StandaloneRedisOption{
+		Addr:     mr.Addr(),
+		Username: "svc-lock",
+		Password: "secret",
+	})
+	if err != nil {
+		t.Fatalf("NewStandaloneRedisClient() error = %v", err)
+	}
+	defer client.Close()
+
+	rc, ok := client.(*redisClient)
+	if !ok {
+		t.Fatalf("client type = %T, want *redisClient", client)
+	}
+
+	rdb, ok := rc.closer.(*redis.Client)
+	if !ok {
+		t.Fatalf("closer type = %T, want *redis.Client", rc.closer)
+	}
+
+	opt := rdb.Options()
+	if got := opt.Username; got != "svc-lock" {
+		t.Fatalf("Options.Username = %q, want %q", got, "svc-lock")
+	}
+	if got := opt.Password; got != "secret" {
+		t.Fatalf("Options.Password = %q, want %q", got, "secret")
+	}
+}
+
+// TestNewStandaloneRedisClient_AuthErrorWrapped verifies that ACL auth
+// failures are returned as wrapped errors rather than panics or silent
+// failures.
+func TestNewStandaloneRedisClient_AuthErrorWrapped(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth("svc-lock", "secret")
+
+	_, err := NewStandaloneRedisClient(StandaloneRedisOption{
+		Addr:        mr.Addr(),
+		Username:    "svc-lock",
+		Password:    "wrong-secret",
+		DialTimeout: time.Second,
+	})
+	if err == nil {
+		t.Fatal("NewStandaloneRedisClient() error = nil, want wrapped auth error")
+	}
+
+	cause := errors.Unwrap(err)
+	if cause == nil {
+		t.Fatalf("errors.Unwrap(err) = nil, want underlying auth error; err=%v", err)
+	}
+	if !strings.Contains(err.Error(), cause.Error()) {
+		t.Fatalf("wrapped error %q does not include underlying error %q", err.Error(), cause.Error())
+	}
+}
 
 // TestWithTTL verifies that a short TTL causes the lock to expire, allowing
 // another Acquire to succeed afterwards.

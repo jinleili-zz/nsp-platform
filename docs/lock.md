@@ -73,6 +73,7 @@ type Lock interface {
 | 字段名 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `Addrs` | `[]string` | **必填** | Redis Cluster 节点地址列表 |
+| `Username` | `string` | `""` | Redis ACL 用户名，空值时退回传统密码认证 |
 | `Password` | `string` | `""` | Redis AUTH 密码 |
 | `PoolSize` | `int` | `10` | 每节点连接池大小 |
 | `DialTimeout` | `time.Duration` | `5s` | 连接超时 |
@@ -84,6 +85,7 @@ type Lock interface {
 | 字段名 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `Addr` | `string` | **必填** | Redis 地址，如 `localhost:6379` |
+| `Username` | `string` | `""` | Redis ACL 用户名，空值时退回传统密码认证 |
 | `Password` | `string` | `""` | Redis AUTH 密码 |
 | `PoolSize` | `int` | `10` | 连接池大小 |
 
@@ -137,6 +139,20 @@ func main() {
     time.Sleep(500 * time.Millisecond)
     fmt.Println("支付完成")
 }
+```
+
+### Redis ACL 认证
+
+```go
+client, err := lock.NewRedisClient(lock.RedisOption{
+    Addrs:    []string{"redis-0:6379", "redis-1:6379", "redis-2:6379"},
+    Username: "svc-lock",
+    Password: "your-password",
+})
+if err != nil {
+    panic(err)
+}
+defer client.Close()
 ```
 
 ### 快速失败模式（TryAcquire）

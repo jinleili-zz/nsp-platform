@@ -37,8 +37,8 @@ import (
 
 	"github.com/go-redsync/redsync/v4"
 	goredis "github.com/go-redsync/redsync/v4/redis/goredis/v9"
-	"github.com/redis/go-redis/v9"
 	"github.com/jinleili-zz/nsp-platform/logger"
+	"github.com/redis/go-redis/v9"
 )
 
 // RedisOption holds configuration for the Redis Cluster client.
@@ -50,6 +50,9 @@ type RedisOption struct {
 	// resilience.
 	// Example: []string{"redis-0:6379", "redis-1:6379", "redis-2:6379"}
 	Addrs []string
+
+	// Username is the Redis ACL username. Leave empty to use password-only auth.
+	Username string
 
 	// Password is the Redis AUTH password. Leave empty when no password is set.
 	Password string
@@ -84,11 +87,32 @@ type RedisOption struct {
 // A ClusterInfo ping is performed to validate connectivity before returning.
 // Returns an error if opt.Addrs is empty or the cluster is unreachable.
 func NewRedisClient(opt RedisOption) (Client, error) {
+	clusterOpt, err := newClusterOptions(opt)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterClient := redis.NewClusterClient(clusterOpt)
+
+	// Validate connectivity with a bounded timeout.
+	checkCtx, cancel := context.WithTimeout(context.Background(), clusterOpt.DialTimeout)
+	defer cancel()
+	if _, err := clusterClient.ClusterInfo(checkCtx).Result(); err != nil {
+		_ = clusterClient.Close()
+		return nil, fmt.Errorf("lock: redis cluster unreachable: %w", err)
+	}
+
+	pool := goredis.NewPool(clusterClient)
+	rs := redsync.New(pool)
+
+	return &redisClient{rs: rs, closer: clusterClient}, nil
+}
+
+func newClusterOptions(opt RedisOption) (*redis.ClusterOptions, error) {
 	if len(opt.Addrs) == 0 {
 		return nil, fmt.Errorf("lock: RedisOption.Addrs must not be empty")
 	}
 
-	// Apply defaults.
 	if opt.PoolSize == 0 {
 		opt.PoolSize = 10
 	}
@@ -102,8 +126,9 @@ func NewRedisClient(opt RedisOption) (Client, error) {
 		opt.WriteTimeout = 3 * time.Second
 	}
 
-	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
+	return &redis.ClusterOptions{
 		Addrs:          opt.Addrs,
+		Username:       opt.Username,
 		Password:       opt.Password,
 		PoolSize:       opt.PoolSize,
 		DialTimeout:    opt.DialTimeout,
@@ -111,20 +136,7 @@ func NewRedisClient(opt RedisOption) (Client, error) {
 		WriteTimeout:   opt.WriteTimeout,
 		RouteByLatency: opt.RouteByLatency,
 		RouteRandomly:  opt.RouteRandomly,
-	})
-
-	// Validate connectivity with a bounded timeout.
-	checkCtx, cancel := context.WithTimeout(context.Background(), opt.DialTimeout)
-	defer cancel()
-	if _, err := clusterClient.ClusterInfo(checkCtx).Result(); err != nil {
-		_ = clusterClient.Close()
-		return nil, fmt.Errorf("lock: redis cluster unreachable: %w", err)
-	}
-
-	pool := goredis.NewPool(clusterClient)
-	rs := redsync.New(pool)
-
-	return &redisClient{rs: rs, closer: clusterClient}, nil
+	}, nil
 }
 
 // redisClient implements Client using redsync.
@@ -170,11 +182,11 @@ func (c *redisClient) Close() error {
 
 // redisLock implements Lock using a redsync.Mutex.
 type redisLock struct {
-	muMu sync.Mutex         // protects mu and wd fields
-	mu   *redsync.Mutex     // underlying redsync lock instance
-	wd   *watchdog          // non-nil when auto-renewal is active
-	opt  LockOption         // options supplied at creation time
-	rs   *redsync.Redsync   // used by TryAcquire to create a temporary instance
+	muMu sync.Mutex       // protects mu and wd fields
+	mu   *redsync.Mutex   // underlying redsync lock instance
+	wd   *watchdog        // non-nil when auto-renewal is active
+	opt  LockOption       // options supplied at creation time
+	rs   *redsync.Redsync // used by TryAcquire to create a temporary instance
 }
 
 // startWatchdog starts the watchdog goroutine if EnableWatchdog is true.
@@ -344,6 +356,9 @@ type StandaloneRedisOption struct {
 	// Addr is the Redis server address, e.g. "localhost:6379".
 	Addr string
 
+	// Username is the Redis ACL username. Leave empty to use password-only auth.
+	Username string
+
 	// Password is the Redis AUTH password. Leave empty when no password is set.
 	Password string
 
@@ -366,6 +381,28 @@ type StandaloneRedisOption struct {
 // Use this for local development and demos only. For production, use
 // NewRedisClient which connects to a Redis Cluster.
 func NewStandaloneRedisClient(opt StandaloneRedisOption) (Client, error) {
+	redisOpt, err := newStandaloneOptions(opt)
+	if err != nil {
+		return nil, err
+	}
+
+	rdb := redis.NewClient(redisOpt)
+
+	// Validate connectivity with a bounded timeout.
+	checkCtx, cancel := context.WithTimeout(context.Background(), redisOpt.DialTimeout)
+	defer cancel()
+	if err := rdb.Ping(checkCtx).Err(); err != nil {
+		_ = rdb.Close()
+		return nil, fmt.Errorf("lock: redis unreachable: %w", err)
+	}
+
+	pool := goredis.NewPool(rdb)
+	rs := redsync.New(pool)
+
+	return &redisClient{rs: rs, closer: rdb}, nil
+}
+
+func newStandaloneOptions(opt StandaloneRedisOption) (*redis.Options, error) {
 	if opt.Addr == "" {
 		return nil, fmt.Errorf("lock: StandaloneRedisOption.Addr must not be empty")
 	}
@@ -383,25 +420,13 @@ func NewStandaloneRedisClient(opt StandaloneRedisOption) (Client, error) {
 		opt.WriteTimeout = 3 * time.Second
 	}
 
-	rdb := redis.NewClient(&redis.Options{
+	return &redis.Options{
 		Addr:         opt.Addr,
+		Username:     opt.Username,
 		Password:     opt.Password,
 		PoolSize:     opt.PoolSize,
 		DialTimeout:  opt.DialTimeout,
 		ReadTimeout:  opt.ReadTimeout,
 		WriteTimeout: opt.WriteTimeout,
-	})
-
-	// Validate connectivity with a bounded timeout.
-	checkCtx, cancel := context.WithTimeout(context.Background(), opt.DialTimeout)
-	defer cancel()
-	if err := rdb.Ping(checkCtx).Err(); err != nil {
-		_ = rdb.Close()
-		return nil, fmt.Errorf("lock: redis unreachable: %w", err)
-	}
-
-	pool := goredis.NewPool(rdb)
-	rs := redsync.New(pool)
-
-	return &redisClient{rs: rs, closer: rdb}, nil
+	}, nil
 }

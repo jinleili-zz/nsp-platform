@@ -157,4 +157,15 @@ Usage example:
           // Lock expired – re-acquire or abort the current operation.
       }
   }
+
+  // Redis ACL example.
+  aclClient, err := lock.NewRedisClient(lock.RedisOption{
+      Addrs:    []string{"redis-0:6379", "redis-1:6379", "redis-2:6379"},
+      Username: "svc-lock",
+      Password: "your-password",
+  })
+  if err != nil {
+      panic(err)
+  }
+  defer aclClient.Close()
 */
