@@ -161,6 +161,9 @@ type RedisOption struct {
     // 示例：[]string{"redis-0:6379", "redis-1:6379", "redis-2:6379"}
     Addrs []string
 
+    // Username Redis ACL 用户名，留空时退回传统密码认证
+    Username string
+
     // Password Redis 密码，无密码时留空
     Password string
 
@@ -203,6 +206,7 @@ func NewRedisFactory(opt RedisOption) (Factory, error)
   3. 创建单个 ClusterClient：
        client := redis.NewClusterClient(&redis.ClusterOptions{
            Addrs:          opt.Addrs,
+           Username:       opt.Username,
            Password:       opt.Password,
            PoolSize:       opt.PoolSize,
            DialTimeout:    opt.DialTimeout,
