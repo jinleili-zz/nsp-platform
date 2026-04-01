@@ -47,4 +47,4 @@
 
 #### Scenario: 分类 logger 格式化日志
 - **WHEN** 调用 `logger.Access().Sugar().Infof("GET %s %d", path, status)`
-- **THEN** 日志写入 access 分类的输出目标，并携带 `log_category="access"` 字段
+- **THEN** 日志写入 access 分类的输出目标，并携带 `category="access"` 字段

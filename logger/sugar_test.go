@@ -241,7 +241,7 @@ func TestCategorySugaredLogger(t *testing.T) {
 		t.Fatalf("expected access log message, got %v", accessEntry["message"])
 	}
 	if accessEntry[FieldCategory] != string(CategoryAccess) {
-		t.Fatalf("expected log_category access, got %v", accessEntry[FieldCategory])
+		t.Fatalf("expected category access, got %v", accessEntry[FieldCategory])
 	}
 	if strings.Contains(string(platformLog), "GET /health 200") {
 		t.Fatal("access sugar log should not be written to platform log")

@@ -22,7 +22,7 @@ type SugaredLogger interface {
 	// Errorf logs a formatted message at error level.
 	Errorf(format string, args ...any)
 
-	// Fatalf logs a formatted message at fatal level and exits the process.
+	// Fatalf logs a formatted message and exits the process.
 	Fatalf(format string, args ...any)
 
 	// DebugContextf logs a formatted message at debug level with context fields.

@@ -28,4 +28,4 @@
 - [x] 6.1 在 `logger/sugar_test.go` 中编写 `f` 系列方法的单元测试，验证 message 格式化正确
 - [x] 6.2 编写 `ContextF` 测试，验证 trace_id/span_id 字段自动注入
 - [x] 6.3 编写 `With` 链式测试，验证 `l.With("k","v").Sugar().Infof(...)` 携带附加字段
-- [x] 6.4 编写分类 logger 的 `Sugar()` 测试，验证 `log_category` 字段存在且输出路径与分类一致
+- [x] 6.4 编写分类 logger 的 `Sugar()` 测试，验证 `category` 字段存在且输出路径与分类一致
