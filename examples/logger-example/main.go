@@ -3,12 +3,26 @@ package main
 
 import (
 	"context"
+	"flag"
 
 	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 func main() {
-	cfg := logger.DevelopmentConfig("logger-example")
+	mode := flag.String("mode", "dev", "logger mode: dev, prod, file")
+	logFile := flag.String("log-file", "logger-example.log", "log file path when mode=file")
+	flag.Parse()
+
+	var cfg *logger.Config
+	switch *mode {
+	case "prod":
+		cfg = logger.DefaultConfig("logger-example")
+	case "file":
+		cfg = logger.MultiOutputConfig("logger-example", *logFile)
+	default:
+		cfg = logger.DevelopmentConfig("logger-example")
+	}
+
 	if err := logger.Init(cfg); err != nil {
 		panic("failed to initialize logger: " + err.Error())
 	}
