@@ -429,7 +429,7 @@ func (c *Coordinator) executeSyncStep(ctx context.Context, tx *Transaction, step
 
 	// Step failed, trigger compensation
 	c.triggerCompensation(ctx, tx, err.Error())
-	return false
+	return true
 }
 
 // executeAsyncStep initiates an asynchronous step.
@@ -448,7 +448,7 @@ func (c *Coordinator) executeAsyncStep(ctx context.Context, tx *Transaction, ste
 
 	// Step failed, trigger compensation
 	c.triggerCompensation(ctx, tx, err.Error())
-	return false
+	return true
 }
 
 // waitForAsyncStep waits for an async step to complete via polling.
@@ -456,6 +456,34 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	// Register for poll notifications
 	notifyCh := c.poller.RegisterNotify(tx.ID)
 	defer c.poller.UnregisterNotify(tx.ID)
+
+	// Re-read the latest step state after registering so a poll result that
+	// arrived before channel registration does not strand the coordinator.
+	latestStep, err := c.store.GetStep(ctx, step.ID)
+	if err != nil {
+		fmt.Printf("failed to reload async step %s: %v\n", step.ID, err)
+		return false
+	}
+	if latestStep == nil {
+		c.triggerCompensation(ctx, tx, fmt.Sprintf("async step %s not found", step.ID))
+		return true
+	}
+	switch latestStep.Status {
+	case StepStatusSucceeded:
+		if err := c.store.UpdateTransactionStep(ctx, tx.ID, latestStep.Index+1); err != nil {
+			fmt.Printf("failed to update transaction step: %v\n", err)
+		}
+		return true
+	case StepStatusFailed:
+		reason := latestStep.LastError
+		if reason == "" {
+			reason = "async step failed"
+		}
+		c.triggerCompensation(ctx, tx, reason)
+		return true
+	case StepStatusCompensating, StepStatusCompensated, StepStatusSkipped:
+		return true
+	}
 
 	// Create a timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.config.AsyncStepTimeout)
@@ -507,11 +535,12 @@ func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, 
 
 // executeCompensation executes compensation for all completed steps in reverse order.
 func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, steps []*Step) {
-	// Find all steps that need compensation (succeeded steps in reverse order)
+	// Find all steps that need compensation. A step left in compensating after a
+	// crash must be retried during recovery, not skipped.
 	var toCompensate []*Step
 	for i := len(steps) - 1; i >= 0; i-- {
 		step := steps[i]
-		if step.Status == StepStatusSucceeded {
+		if step.Status == StepStatusSucceeded || step.Status == StepStatusCompensating {
 			toCompensate = append(toCompensate, step)
 		}
 	}
