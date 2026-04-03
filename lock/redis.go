@@ -286,7 +286,8 @@ func (l *redisLock) Release(ctx context.Context) error {
 
 	ok, err := mu.UnlockContext(ctx)
 	if err != nil {
-		if errors.Is(err, redsync.ErrLockAlreadyExpired) {
+		var takenErr *redsync.ErrTaken
+		if errors.Is(err, redsync.ErrLockAlreadyExpired) || errors.As(err, &takenErr) {
 			return ErrLockExpired
 		}
 		return err

@@ -242,6 +242,21 @@ func TestRelease_PreservesTransportError(t *testing.T) {
 	}
 }
 
+// TestRelease_TreatsTakenAsExpired verifies that Release preserves the lock
+// package contract when redsync reports the lease was taken by another owner.
+func TestRelease_TreatsTakenAsExpired(t *testing.T) {
+	mu := &fakeMutex{
+		name:      uniqueName(t, "lock"),
+		unlockErr: &redsync.ErrTaken{Nodes: []int{0}},
+	}
+	l := &redisLock{mu: mu}
+
+	err := l.Release(context.Background())
+	if !errors.Is(err, ErrLockExpired) {
+		t.Fatalf("Release() error = %v, want ErrLockExpired", err)
+	}
+}
+
 // TestRenew_Success verifies that Renew extends the TTL so the lock is still
 // valid after the original TTL would have expired.
 func TestRenew_Success(t *testing.T) {
