@@ -60,6 +60,10 @@ If signing fails (e.g., body too large, nonce generation error), the Executor SH
 - **WHEN** `auth.Signer.Sign` returns an error during compensation execution
 - **THEN** the compensation SHALL return `ErrCompensationFailed` immediately
 
+#### Scenario: Sign error on poll is fatal
+- **WHEN** `auth.Signer.Sign` returns an error during poll execution
+- **THEN** the poller SHALL treat it as a terminal failure: mark the step as `StepStatusFailed`, delete the poll task, and notify the coordinator to trigger compensation; the poller SHALL NOT release the poll task for retry
+
 ### Requirement: Existing steps remain backward compatible
 Adding `AuthAK`/`AuthSK` fields to the `Step` struct and `auth_ak`/`auth_sk` columns to `saga_steps` (with `DEFAULT ''`) SHALL be purely additive. All existing Step definitions and stored rows with zero-value auth fields SHALL behave identically to pre-change behavior.
 

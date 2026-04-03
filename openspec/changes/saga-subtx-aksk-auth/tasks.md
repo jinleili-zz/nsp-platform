@@ -1,7 +1,7 @@
 ## 1. 数据库迁移
 
-- [ ] 1.1 在 `saga/migrations/saga.sql` 的 `saga_steps` 表定义中新增 `auth_ak VARCHAR(128) NOT NULL DEFAULT ''` 和 `auth_sk VARCHAR(128) NOT NULL DEFAULT ''` 两列，并附加对应 COMMENT
-- [ ] 1.2 在同文件末尾追加在线迁移语句：`ALTER TABLE saga_steps ADD COLUMN IF NOT EXISTS auth_ak VARCHAR(128) NOT NULL DEFAULT ''; ALTER TABLE saga_steps ADD COLUMN IF NOT EXISTS auth_sk VARCHAR(128) NOT NULL DEFAULT '';`
+- [ ] 1.1 在 `saga/migrations/saga.sql` 的 `saga_steps` 表定义中新增 `auth_ak TEXT NOT NULL DEFAULT ''` 和 `auth_sk TEXT NOT NULL DEFAULT ''` 两列，并附加对应 COMMENT
+- [ ] 1.2 在同文件末尾追加在线迁移语句：`ALTER TABLE saga_steps ADD COLUMN IF NOT EXISTS auth_ak TEXT NOT NULL DEFAULT ''; ALTER TABLE saga_steps ADD COLUMN IF NOT EXISTS auth_sk TEXT NOT NULL DEFAULT '';`
 
 ## 2. 扩展 Step 数据模型与构建时校验
 
@@ -27,7 +27,9 @@
 - [ ] 5.2 在 `ExecuteStep` 方法中，于所有业务 header 设置完毕、`client.Do(req)` 调用之前，插入 `signRequestIfNeeded` 调用；签名失败时先调用 `e.store.UpdateStepStatus(..., StepStatusFailed, ...)` 再直接返回 `ErrStepFatal`（不经过 `handleHTTPError`，保持 RetryCount 不变）
 - [ ] 5.3 在 `ExecuteAsyncStep` 方法中同样插入 `signRequestIfNeeded` 调用，处理方式与 5.2 一致
 - [ ] 5.4 在 `CompensateStep` 方法的每次重试循环中，在 `client.Do(req)` 之前调用 `signRequestIfNeeded`；签名失败时直接 `break` 退出重试循环并以 `ErrCompensationFailed` 返回
-- [ ] 5.5 在 `Poll` 方法中，于 `client.Do(req)` 之前调用 `signRequestIfNeeded`；签名失败时直接返回错误
+- [ ] 5.5 在 `Poll` 方法中，于 `client.Do(req)` 之前调用 `signRequestIfNeeded`；签名失败时包装为可识别的签名错误返回（例如 `fmt.Errorf("signing failed: %w", err)`）
+- [ ] 5.6 在 `saga/executor.go` 中新增导出函数 `IsSigningError(err error) bool`，用于判断 `Poll` 返回的错误是否为签名错误（通过检查错误消息前缀或自定义哨兵错误）
+- [ ] 5.7 在 `saga/poller.go` 的 `processPollTask` 方法中，修改 `Poll` 错误处理路径：当 `executor.IsSigningError(err)` 为 true 时，走 `handlePollFailure` 路径（标记步骤为 failed、删除 poll task、通知 coordinator 触发补偿），而非当前的 `releasePollTask`（释放锁等待下次重试）；非签名错误保持现有的瞬态重试行为不变
 
 ## 6. 补充测试
 
@@ -37,3 +39,4 @@
 - [ ] 6.4 添加单元测试：补偿请求（`CompensateStep`）和轮询请求（`Poll`）在配置 AK/SK 时同样被签名
 - [ ] 6.5 添加单元测试：`SagaBuilder.Build()` 对只填 `AuthAK` 或只填 `AuthSK` 的步骤返回 `ErrStepPartialAuth`
 - [ ] 6.6 添加集成测试（或 store mock 测试）：验证含 AK/SK 的 Step 写入后再读出，`AuthAK`/`AuthSK` 值一致（round-trip）
+- [ ] 6.7 添加单元测试：`poller.processPollTask` 在 `Poll` 返回签名错误时，步骤被标记为 failed 且 poll task 被删除（而非释放锁重试）

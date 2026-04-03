@@ -60,9 +60,9 @@ Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compens
 
 ### D5：AK/SK 持久化到 `saga_steps` 表
 
-**决策**：在 `saga_steps` 表新增 `auth_ak VARCHAR(128) NOT NULL DEFAULT ''` 和 `auth_sk VARCHAR(128) NOT NULL DEFAULT ''` 两列。所有 Store 方法（`CreateSteps`、`CreateTransactionWithSteps` 的 INSERT，`GetSteps`/`GetStep` 的 SELECT，以及 `scanStep`/`scanStepRow` 的 Scan）均需同步更新。
+**决策**：在 `saga_steps` 表新增 `auth_ak TEXT NOT NULL DEFAULT ''` 和 `auth_sk TEXT NOT NULL DEFAULT ''` 两列。所有 Store 方法（`CreateSteps`、`CreateTransactionWithSteps` 的 INSERT，`GetSteps`/`GetStep` 的 SELECT，以及 `scanStep`/`scanStepRow` 的 Scan）均需同步更新。
 
-**理由**：Saga 执行路径在 `Submit` 后完全由 DB 驱动——coordinator 和 poller 通过 `GetSteps`/`GetStep` 加载步骤。若不持久化，工作进程读到的 Step 永远是空凭据，签名逻辑永远不会触发，功能实际失效。`DEFAULT ''` 确保存量行（`auth_ak = ''`、`auth_sk = ''`）被 Executor 识别为"不鉴权"，零迁移成本。
+**理由**：Saga 执行路径在 `Submit` 后完全由 DB 驱动——coordinator 和 poller 通过 `GetSteps`/`GetStep` 加载步骤。若不持久化，工作进程读到的 Step 永远是空凭据，签名逻辑永远不会触发，功能实际失效。`DEFAULT ''` 确保存量行（`auth_ak = ''`、`auth_sk = ''`）被 Executor 识别为"不鉴权"，零迁移成本。使用 `TEXT` 而非 `VARCHAR(N)` 是因为 `auth` 包的 `Credential` 结构体对 AK/SK 长度无约束，且 PostgreSQL 中两者存储和性能完全一致，避免引入不必要的长度限制。
 
 ---
 
@@ -82,7 +82,7 @@ Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compens
 
 ## Migration Plan
 
-1. 运行 `saga/migrations/saga.sql` 中新增的 ALTER TABLE 语句，为线上 `saga_steps` 表添加两列（DEFAULT '' 保证存量行兼容）。
+1. 运行 `saga/migrations/saga.sql` 中新增的 ALTER TABLE 语句，为线上 `saga_steps` 表添加两列（`TEXT NOT NULL DEFAULT ''` 保证存量行兼容）。
 2. 部署新代码：存量步骤 `auth_ak = ''`/`auth_sk = ''`，Executor 跳过签名，行为与变更前完全一致。
 3. 新增需要鉴权的步骤时，填入 `AuthAK`/`AuthSK` 即可。
 4. 回滚：回滚代码，新列对旧代码无副作用（SELECT 不包含新列时忽略）；如需清理列，单独执行 DROP COLUMN（生产环境需评估）。
