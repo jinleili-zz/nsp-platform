@@ -29,6 +29,7 @@ package lock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -40,6 +41,8 @@ import (
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/redis/go-redis/v9"
 )
+
+var clusterConnectivityCheck = pingRedisConnectivity
 
 // RedisOption holds configuration for the Redis Cluster client.
 type RedisOption struct {
@@ -84,7 +87,7 @@ type RedisOption struct {
 
 // NewRedisClient creates a Client backed by redsync + Redis Cluster.
 //
-// A ClusterInfo ping is performed to validate connectivity before returning.
+// A Redis PING is performed to validate connectivity before returning.
 // Returns an error if opt.Addrs is empty or the cluster is unreachable.
 func NewRedisClient(opt RedisOption) (Client, error) {
 	clusterOpt, err := newClusterOptions(opt)
@@ -97,7 +100,7 @@ func NewRedisClient(opt RedisOption) (Client, error) {
 	// Validate connectivity with a bounded timeout.
 	checkCtx, cancel := context.WithTimeout(context.Background(), clusterOpt.DialTimeout)
 	defer cancel()
-	if _, err := clusterClient.ClusterInfo(checkCtx).Result(); err != nil {
+	if err := clusterConnectivityCheck(checkCtx, clusterClient); err != nil {
 		_ = clusterClient.Close()
 		return nil, fmt.Errorf("lock: redis cluster unreachable: %w", err)
 	}
@@ -106,6 +109,14 @@ func NewRedisClient(opt RedisOption) (Client, error) {
 	rs := redsync.New(pool)
 
 	return &redisClient{rs: rs, closer: clusterClient}, nil
+}
+
+type redisPinger interface {
+	Ping(ctx context.Context) *redis.StatusCmd
+}
+
+func pingRedisConnectivity(ctx context.Context, client redisPinger) error {
+	return client.Ping(ctx).Err()
 }
 
 func newClusterOptions(opt RedisOption) (*redis.ClusterOptions, error) {
@@ -180,10 +191,17 @@ func (c *redisClient) Close() error {
 	return nil
 }
 
+type redisMutex interface {
+	Name() string
+	LockContext(ctx context.Context) error
+	UnlockContext(ctx context.Context) (bool, error)
+	ExtendContext(ctx context.Context) (bool, error)
+}
+
 // redisLock implements Lock using a redsync.Mutex.
 type redisLock struct {
 	muMu sync.Mutex       // protects mu and wd fields
-	mu   *redsync.Mutex   // underlying redsync lock instance
+	mu   redisMutex       // underlying redsync lock instance
 	wd   *watchdog        // non-nil when auto-renewal is active
 	opt  LockOption       // options supplied at creation time
 	rs   *redsync.Redsync // used by TryAcquire to create a temporary instance
@@ -200,10 +218,7 @@ func (l *redisLock) startWatchdog() {
 		l.wd.Stop()
 		l.wd = nil
 	}
-	interval := l.opt.TTL / 3
-	if interval < time.Second {
-		interval = time.Second
-	}
+	interval := watchdogInterval(l.opt.TTL)
 	l.wd = newWatchdog(interval, func() error {
 		return l.Renew(context.Background())
 	}, func(format string, args ...any) {
@@ -269,7 +284,15 @@ func (l *redisLock) Release(ctx context.Context) error {
 		wd.Stop()
 	}
 
-	if ok, err := mu.UnlockContext(ctx); !ok || err != nil {
+	ok, err := mu.UnlockContext(ctx)
+	if err != nil {
+		var takenErr *redsync.ErrTaken
+		if errors.Is(err, redsync.ErrLockAlreadyExpired) || errors.As(err, &takenErr) {
+			return ErrLockExpired
+		}
+		return err
+	}
+	if !ok {
 		return ErrLockExpired
 	}
 	return nil
@@ -281,7 +304,15 @@ func (l *redisLock) Renew(ctx context.Context) error {
 	mu := l.mu
 	l.muMu.Unlock()
 
-	if ok, err := mu.ExtendContext(ctx); !ok || err != nil {
+	ok, err := mu.ExtendContext(ctx)
+	if err != nil {
+		var takenErr *redsync.ErrTaken
+		if errors.Is(err, redsync.ErrExtendFailed) || errors.As(err, &takenErr) {
+			return ErrLockExpired
+		}
+		return err
+	}
+	if !ok {
 		return ErrLockExpired
 	}
 	return nil
@@ -306,16 +337,10 @@ type watchdog struct {
 
 // newWatchdog starts a background goroutine that calls renewFn every interval.
 //
-// interval is clamped to a minimum of 1s to prevent excessive renewal
-// frequency when TTL is very short.
-//
 // logFn is used to report renewal failures. Renewal failures do not stop
 // the goroutine; the next tick will retry. The goroutine exits when Stop
 // is called.
 func newWatchdog(interval time.Duration, renewFn func() error, logFn func(string, ...any)) *watchdog {
-	if interval < time.Second {
-		interval = time.Second
-	}
 	w := &watchdog{
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
@@ -335,6 +360,24 @@ func newWatchdog(interval time.Duration, renewFn func() error, logFn func(string
 		}
 	}()
 	return w
+}
+
+func watchdogInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 3
+	if interval > 0 {
+		return interval
+	}
+
+	interval = ttl / 2
+	if interval > 0 {
+		return interval
+	}
+
+	if ttl > 0 {
+		return ttl
+	}
+
+	return time.Millisecond
 }
 
 // Stop halts the renewal goroutine and waits for it to exit completely.

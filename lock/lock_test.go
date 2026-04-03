@@ -7,7 +7,7 @@
 // together with redis.NewClient (plain client, not ClusterClient).
 //
 // The test helper constructs a redisClient directly, bypassing the
-// NewRedisClient factory's ClusterInfo connectivity check.
+// NewRedisClient factory's startup connectivity check.
 //
 // This approach is intentional:
 //   - All Lock interface semantics (Acquire, TryAcquire, Release, Renew,
@@ -37,6 +37,45 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+type fakeMutex struct {
+	name      string
+	lockErr   error
+	unlockOK  bool
+	unlockErr error
+	extendOK  bool
+	extendErr error
+	lockCalls int
+}
+
+func (m *fakeMutex) Name() string {
+	return m.name
+}
+
+func (m *fakeMutex) LockContext(context.Context) error {
+	m.lockCalls++
+	return m.lockErr
+}
+
+func (m *fakeMutex) UnlockContext(context.Context) (bool, error) {
+	return m.unlockOK, m.unlockErr
+}
+
+func (m *fakeMutex) ExtendContext(context.Context) (bool, error) {
+	return m.extendOK, m.extendErr
+}
+
+type fakePinger struct {
+	pingCalls int
+	pingErr   error
+}
+
+func (p *fakePinger) Ping(ctx context.Context) *redis.StatusCmd {
+	p.pingCalls++
+	cmd := redis.NewStatusCmd(ctx, "ping")
+	cmd.SetErr(p.pingErr)
+	return cmd
+}
 
 // newTestClient starts a miniredis instance and returns a Client backed by it.
 // The miniredis server is stopped automatically via t.Cleanup.
@@ -188,6 +227,36 @@ func TestRelease_LockExpired(t *testing.T) {
 	}
 }
 
+// TestRelease_PreservesTransportError verifies that Release does not collapse
+// context or transport failures into ErrLockExpired.
+func TestRelease_PreservesTransportError(t *testing.T) {
+	mu := &fakeMutex{
+		name:      uniqueName(t, "lock"),
+		unlockErr: context.Canceled,
+	}
+	l := &redisLock{mu: mu}
+
+	err := l.Release(context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Release() error = %v, want context.Canceled", err)
+	}
+}
+
+// TestRelease_TreatsTakenAsExpired verifies that Release preserves the lock
+// package contract when redsync reports the lease was taken by another owner.
+func TestRelease_TreatsTakenAsExpired(t *testing.T) {
+	mu := &fakeMutex{
+		name:      uniqueName(t, "lock"),
+		unlockErr: &redsync.ErrTaken{Nodes: []int{0}},
+	}
+	l := &redisLock{mu: mu}
+
+	err := l.Release(context.Background())
+	if !errors.Is(err, ErrLockExpired) {
+		t.Fatalf("Release() error = %v, want ErrLockExpired", err)
+	}
+}
+
 // TestRenew_Success verifies that Renew extends the TTL so the lock is still
 // valid after the original TTL would have expired.
 func TestRenew_Success(t *testing.T) {
@@ -225,6 +294,21 @@ func TestRenew_LockExpired(t *testing.T) {
 	err := l.Renew(context.Background())
 	if !errors.Is(err, ErrLockExpired) {
 		t.Fatalf("Renew() error = %v, want ErrLockExpired", err)
+	}
+}
+
+// TestRenew_PreservesTransportError verifies that Renew does not collapse
+// context or transport failures into ErrLockExpired.
+func TestRenew_PreservesTransportError(t *testing.T) {
+	mu := &fakeMutex{
+		name:      uniqueName(t, "lock"),
+		extendErr: context.DeadlineExceeded,
+	}
+	l := &redisLock{mu: mu}
+
+	err := l.Renew(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Renew() error = %v, want context.DeadlineExceeded", err)
 	}
 }
 
@@ -307,6 +391,56 @@ func TestNewRedisClient_UsernameField(t *testing.T) {
 	}
 	if got := opt.Password; got != "secret" {
 		t.Fatalf("ClusterOptions.Password = %q, want %q", got, "secret")
+	}
+}
+
+// TestPingRedisConnectivity verifies that the cluster startup probe uses a
+// plain Redis PING and surfaces its result.
+func TestPingRedisConnectivity(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		pinger := &fakePinger{}
+		if err := pingRedisConnectivity(context.Background(), pinger); err != nil {
+			t.Fatalf("pingRedisConnectivity() error = %v", err)
+		}
+		if pinger.pingCalls != 1 {
+			t.Fatalf("Ping() calls = %d, want 1", pinger.pingCalls)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		pinger := &fakePinger{pingErr: context.DeadlineExceeded}
+		err := pingRedisConnectivity(context.Background(), pinger)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("pingRedisConnectivity() error = %v, want context.DeadlineExceeded", err)
+		}
+	})
+}
+
+// TestNewRedisClient_UsesConnectivityCheck verifies that NewRedisClient
+// delegates startup validation to the injectable connectivity probe.
+func TestNewRedisClient_UsesConnectivityCheck(t *testing.T) {
+	origCheck := clusterConnectivityCheck
+	t.Cleanup(func() {
+		clusterConnectivityCheck = origCheck
+	})
+
+	var calls int
+	clusterConnectivityCheck = func(ctx context.Context, client redisPinger) error {
+		calls++
+		return nil
+	}
+
+	client, err := NewRedisClient(RedisOption{
+		Addrs:       []string{"127.0.0.1:6379"},
+		DialTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewRedisClient() error = %v", err)
+	}
+	defer client.Close()
+
+	if calls != 1 {
+		t.Fatalf("connectivity check calls = %d, want 1", calls)
 	}
 }
 
@@ -460,6 +594,33 @@ func TestWithWatchdog(t *testing.T) {
 		t.Fatalf("TryAcquire() after Release + expiry error = %v", err)
 	}
 	_ = l2.Release(context.Background())
+}
+
+// TestWithWatchdog_SubSecondTTL verifies that watchdog renewals still happen
+// before the original lease expires when TTL is below one second.
+func TestWithWatchdog_SubSecondTTL(t *testing.T) {
+	client := newTestClient(t)
+	name := uniqueName(t, "lock")
+
+	l1 := client.New(name,
+		WithTTL(500*time.Millisecond),
+		WithWatchdog(),
+	)
+	if err := l1.Acquire(context.Background()); err != nil {
+		t.Fatalf("l1.Acquire() error = %v", err)
+	}
+
+	time.Sleep(650 * time.Millisecond)
+
+	l2 := client.New(name, WithTTL(500*time.Millisecond))
+	err := l2.TryAcquire(context.Background())
+	if !errors.Is(err, ErrNotAcquired) {
+		t.Fatalf("l2.TryAcquire() error = %v, want ErrNotAcquired while watchdog is renewing", err)
+	}
+
+	if err := l1.Release(context.Background()); err != nil {
+		t.Fatalf("l1.Release() error = %v", err)
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
