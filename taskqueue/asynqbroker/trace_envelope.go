@@ -11,8 +11,6 @@ import (
 
 // taskEnvelope wraps the original task payload with trace metadata for
 // transparent propagation across the message queue boundary.
-// Version field (always 1) is used to reliably detect envelope format,
-// avoiding false positives from business payloads that may contain a "payload" key.
 type taskEnvelope struct {
 	Version int               `json:"_v"`
 	TraceID string            `json:"_tid,omitempty"`
@@ -66,8 +64,17 @@ func wrapWithTrace(ctx context.Context, payload []byte, reply *taskqueue.ReplySp
 // it returns the original payload with nil reply and empty metadata for
 // backward compatibility.
 func unwrapEnvelope(data []byte) (payload []byte, traceMeta map[string]string, reply *taskqueue.ReplySpec, businessMeta map[string]string) {
+	var probe struct {
+		Version *int             `json:"_v"`
+		Sampled *bool            `json:"_smpl"`
+		Payload *json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil || probe.Version == nil || *probe.Version != 1 || probe.Sampled == nil || probe.Payload == nil {
+		return data, nil, nil, map[string]string{}
+	}
+
 	var env taskEnvelope
-	if err := json.Unmarshal(data, &env); err != nil || env.Version != 1 {
+	if err := json.Unmarshal(data, &env); err != nil {
 		return data, nil, nil, map[string]string{}
 	}
 

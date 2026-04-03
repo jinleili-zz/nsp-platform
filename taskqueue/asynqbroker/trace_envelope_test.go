@@ -242,6 +242,25 @@ func TestUnwrapEnvelope_LegacyPayload(t *testing.T) {
 	}
 }
 
+func TestUnwrapEnvelope_RawJSONWithVersionField(t *testing.T) {
+	raw := []byte(`{"_v":1,"name":"foo"}`)
+
+	payload, traceMeta, reply, businessMeta := unwrapEnvelope(raw)
+
+	if string(payload) != string(raw) {
+		t.Fatalf("expected raw payload returned as-is, got %s", payload)
+	}
+	if traceMeta != nil {
+		t.Fatalf("expected nil trace metadata for raw payload, got %#v", traceMeta)
+	}
+	if reply != nil {
+		t.Fatalf("expected nil reply for raw payload, got %#v", reply)
+	}
+	if len(businessMeta) != 0 {
+		t.Fatalf("expected empty business metadata for raw payload, got %#v", businessMeta)
+	}
+}
+
 func TestUnwrapEnvelope_InvalidJSON(t *testing.T) {
 	garbage := []byte(`not json at all`)
 
