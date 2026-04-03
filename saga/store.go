@@ -645,22 +645,48 @@ func (s *PostgresStore) IncrementStepRetry(ctx context.Context, stepID string) e
 
 // IncrementStepPollCount increments the poll count and updates the next poll time.
 func (s *PostgresStore) IncrementStepPollCount(ctx context.Context, stepID string, nextPollAt time.Time) error {
-	query := `
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer dbTx.Rollback()
+
+	stepQuery := `
 		UPDATE saga_steps
 		SET poll_count = poll_count + 1, next_poll_at = $2
 		WHERE id = $1
 	`
-	result, err := s.db.ExecContext(ctx, query, stepID, nextPollAt)
+	result, err := dbTx.ExecContext(ctx, stepQuery, stepID, nextPollAt)
 	if err != nil {
 		return fmt.Errorf("failed to increment step poll count: %w", err)
 	}
-
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("step not found: %s", stepID)
+	}
+
+	taskQuery := `
+		UPDATE saga_poll_tasks
+		SET next_poll_at = $2
+		WHERE step_id = $1
+	`
+	result, err = dbTx.ExecContext(ctx, taskQuery, stepID, nextPollAt)
+	if err != nil {
+		return fmt.Errorf("failed to update poll task next poll time: %w", err)
+	}
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get poll task rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("poll task not found for step: %s", stepID)
+	}
+
+	if err := dbTx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit poll reschedule: %w", err)
 	}
 
 	return nil

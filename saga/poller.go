@@ -100,12 +100,13 @@ func (p *Poller) RegisterNotify(txID string) chan PollResult {
 }
 
 // UnregisterNotify removes the notification channel for a transaction.
+// The channel is not closed because poller goroutines may still hold a
+// reference and attempt a best-effort send after deregistration.
 func (p *Poller) UnregisterNotify(txID string) {
 	p.notifyMu.Lock()
 	defer p.notifyMu.Unlock()
 
-	if ch, exists := p.notifyChan[txID]; exists {
-		close(ch)
+	if _, exists := p.notifyChan[txID]; exists {
 		delete(p.notifyChan, txID)
 	}
 }
