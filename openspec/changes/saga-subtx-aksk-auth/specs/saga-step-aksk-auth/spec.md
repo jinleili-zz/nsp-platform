@@ -47,6 +47,7 @@ The Executor SHALL apply AK/SK signing consistently to all three HTTP call types
 #### Scenario: Poll request is signed
 - **WHEN** `Poll` is called with a Step that has non-empty AK/SK
 - **THEN** the poll HTTP request SHALL be signed before sending
+- **NOTE** Poll requests typically have no body (nil); the signer SHALL handle nil/empty body correctly by hashing empty content
 
 ### Requirement: Signing failure results in fatal step error
 If signing fails (e.g., body too large, nonce generation error), the Executor SHALL treat the failure as a fatal error and SHALL NOT retry the step.

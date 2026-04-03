@@ -11,7 +11,7 @@
 
 ## 3. 持久化：Store 层写入路径
 
-- [ ] 3.1 更新 `CreateTransactionWithSteps` 中的 `stepQuery` INSERT 语句：在字段列表末尾追加 `auth_ak, auth_sk`，并在 `stmt.ExecContext` 的参数列表中追加 `step.AuthAK, step.AuthSK`（当前为 21 个参数，新增后为 23 个）
+- [ ] 3.1 更新 `CreateTransactionWithSteps` 中的 `stepQuery` INSERT 语句：在字段列表和参数占位符列表末尾追加 `auth_ak, auth_sk` 两个字段及其对应占位符，并在 `stmt.ExecContext` 的参数列表末尾追加 `step.AuthAK, step.AuthSK`
 - [ ] 3.2 更新 `CreateSteps` 中的 `query` INSERT 语句：同上，保持与 3.1 一致
 
 ## 4. 持久化：Store 层读取路径
@@ -23,7 +23,7 @@
 
 ## 5. 实现 Executor 签名逻辑
 
-- [ ] 5.1 在 `saga/executor.go` 中添加辅助函数 `signRequestIfNeeded(step *Step, req *http.Request) error`：若 `step.AuthAK != ""` 且 `step.AuthSK != ""`，则调用 `auth.NewSigner(step.AuthAK, step.AuthSK).Sign(req)`，否则直接返回 nil；在文件顶部 import 中添加 `github.com/jinleili-zz/nsp-platform/auth`
+- [ ] 5.1 在 `saga/executor.go` 中添加辅助函数 `signRequestIfNeeded(step *Step, req *http.Request) error`：若 `step.AuthAK != ""` 且 `step.AuthSK != ""`，则调用 `auth.NewSigner(step.AuthAK, step.AuthSK).Sign(req)`，否则直接返回 nil；在文件顶部 import 中添加 `github.com/jinleili-zz/nsp-platform/auth`（当前与 `trace` 包同 module，若 auth 后续迁移到 nsp-common 需同步更新 import 路径）
 - [ ] 5.2 在 `ExecuteStep` 方法中，于所有业务 header 设置完毕、`client.Do(req)` 调用之前，插入 `signRequestIfNeeded` 调用；签名失败时先调用 `e.store.UpdateStepStatus(..., StepStatusFailed, ...)` 再直接返回 `ErrStepFatal`（不经过 `handleHTTPError`，保持 RetryCount 不变）
 - [ ] 5.3 在 `ExecuteAsyncStep` 方法中同样插入 `signRequestIfNeeded` 调用，处理方式与 5.2 一致
 - [ ] 5.4 在 `CompensateStep` 方法的每次重试循环中，在 `client.Do(req)` 之前调用 `signRequestIfNeeded`；签名失败时直接 `break` 退出重试循环并以 `ErrCompensationFailed` 返回

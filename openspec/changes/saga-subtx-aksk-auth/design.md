@@ -89,4 +89,5 @@ Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compens
 
 ## Open Questions
 
-- 无。AK/SK 轮换和密钥存储超出本次范围，可作为后续独立 change。
+- **SK 明文存储的安全加固（Phase 2）**：当前 `auth_sk` 列以明文存储，属于有意的 MVP 简化。后续应在 Store 层为 `auth_sk` 列增加应用层加密（AES-GCM + envelope encryption），或改为只存加密后的 ciphertext + key reference。此外，数据库备份和慢查询日志中可能泄露 SK 明文，需配合 DB 层审计策略一并考虑。此项作为后续独立 change 跟踪。
+- AK/SK 轮换和密钥生命周期管理超出本次范围，可作为后续独立 change。
