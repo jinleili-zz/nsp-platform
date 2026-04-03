@@ -21,15 +21,6 @@ type taskEnvelope struct {
 	Payload []byte            `json:"payload"`
 }
 
-// envelopeProbe is used to detect whether a payload is an internal wrapper
-// without corrupting raw business JSON that may reuse reserved-looking keys.
-// A valid internal envelope always contains version, sampled, and payload.
-type envelopeProbe struct {
-	Version *int             `json:"_v"`
-	Sampled *bool            `json:"_smpl"`
-	Payload *json.RawMessage `json:"payload"`
-}
-
 // wrapWithTrace extracts TraceContext from ctx and wraps the payload into an
 // envelope. If neither trace, reply, nor metadata is present, or serialization
 // fails, the original payload is returned unchanged (graceful degradation).
@@ -73,7 +64,11 @@ func wrapWithTrace(ctx context.Context, payload []byte, reply *taskqueue.ReplySp
 // it returns the original payload with nil reply and empty metadata for
 // backward compatibility.
 func unwrapEnvelope(data []byte) (payload []byte, traceMeta map[string]string, reply *taskqueue.ReplySpec, businessMeta map[string]string) {
-	var probe envelopeProbe
+	var probe struct {
+		Version *int             `json:"_v"`
+		Sampled *bool            `json:"_smpl"`
+		Payload *json.RawMessage `json:"payload"`
+	}
 	if err := json.Unmarshal(data, &probe); err != nil || probe.Version == nil || *probe.Version != 1 || probe.Sampled == nil || probe.Payload == nil {
 		return data, nil, nil, map[string]string{}
 	}
