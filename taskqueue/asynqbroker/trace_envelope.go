@@ -11,8 +11,6 @@ import (
 
 // taskEnvelope wraps the original task payload with trace metadata for
 // transparent propagation across the message queue boundary.
-// Version field (always 1) is used to reliably detect envelope format,
-// avoiding false positives from business payloads that may contain a "payload" key.
 type taskEnvelope struct {
 	Version int               `json:"_v"`
 	TraceID string            `json:"_tid,omitempty"`
@@ -21,6 +19,15 @@ type taskEnvelope struct {
 	ReplyTo *json.RawMessage  `json:"_rto,omitempty"`
 	Meta    map[string]string `json:"_meta,omitempty"`
 	Payload []byte            `json:"payload"`
+}
+
+// envelopeProbe is used to detect whether a payload is an internal wrapper
+// without corrupting raw business JSON that may reuse reserved-looking keys.
+// A valid internal envelope always contains version, sampled, and payload.
+type envelopeProbe struct {
+	Version *int             `json:"_v"`
+	Sampled *bool            `json:"_smpl"`
+	Payload *json.RawMessage `json:"payload"`
 }
 
 // wrapWithTrace extracts TraceContext from ctx and wraps the payload into an
@@ -66,8 +73,13 @@ func wrapWithTrace(ctx context.Context, payload []byte, reply *taskqueue.ReplySp
 // it returns the original payload with nil reply and empty metadata for
 // backward compatibility.
 func unwrapEnvelope(data []byte) (payload []byte, traceMeta map[string]string, reply *taskqueue.ReplySpec, businessMeta map[string]string) {
+	var probe envelopeProbe
+	if err := json.Unmarshal(data, &probe); err != nil || probe.Version == nil || *probe.Version != 1 || probe.Sampled == nil || probe.Payload == nil {
+		return data, nil, nil, map[string]string{}
+	}
+
 	var env taskEnvelope
-	if err := json.Unmarshal(data, &env); err != nil || env.Version != 1 {
+	if err := json.Unmarshal(data, &env); err != nil {
 		return data, nil, nil, map[string]string{}
 	}
 
