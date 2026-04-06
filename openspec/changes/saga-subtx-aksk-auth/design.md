@@ -1,48 +1,66 @@
 ## Context
 
-Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compensation action、poll。目前所有请求均不携带身份认证信息。`auth` 包已实现完整的 NSP-HMAC-SHA256 签名方案（`auth.Signer`），可直接复用。
+Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compensation action、poll。目前所有请求均不携带身份认证信息。`auth` 包已实现完整的 NSP-HMAC-SHA256 签名方案（`auth.Signer`），以及凭证存储接口（`auth.CredentialStore`）和内存实现（`auth.MemoryStore`），可直接复用。
 
-关键的执行路径：`Engine.Submit` 将 `SagaDefinition` 的 Steps 写入 `saga_steps` 表后，原始的内存对象不再被使用。此后 coordinator（恢复逻辑）和 poller（异步轮询）均通过 `store.GetSteps` / `store.GetStep` 从 DB 读取步骤来驱动执行。因此 `AuthAK`/`AuthSK` **必须被持久化到 DB** 并在读取时还原，否则工作进程拿到的 Step 永远是空凭据。
+关键的执行路径：`Engine.Submit` 将 `SagaDefinition` 的 Steps 写入 `saga_steps` 表后，原始的内存对象不再被使用。此后 coordinator（恢复逻辑）和 poller（异步轮询）均通过 `store.GetSteps` / `store.GetStep` 从 DB 读取步骤来驱动执行。因此 `AuthAK` **必须被持久化到 DB** 并在读取时还原。而 SK 无需持久化——执行时通过 `auth.CredentialStore.GetByAK(ak)` 从内存凭证中心运行时查询即可。
 
 `Executor` 持有 `*http.Client`，在发送请求前构造 `*http.Request`，插入签名的最佳时机是 `Do(req)` 调用之前。
 
 ## Goals / Non-Goals
 
 **Goals:**
-- `Step` 支持可选 AK/SK 配置字段；半配置（只填一个）在 `Build()` 阶段 fail-fast
-- AK/SK 随步骤持久化到 `saga_steps` 表，store 层完整负责写入和读取
-- `Executor` 在发送 action / compensate / poll 请求前，若 Step 配置了 AK/SK，自动调用 `auth.Signer.Sign` 签名
-- 两个字段均为空的 Step 行为与现有完全一致（零破坏）
-- 签名失败为 fatal 错误（不重试）
+- `Step` 支持可选 `AuthAK` 配置字段；非空时启用签名，为空时不鉴权
+- AK 随步骤持久化到 `saga_steps` 表，SK 不落盘，通过 `auth.CredentialStore` 运行时查询
+- `Executor` 在发送 action / compensate / poll 请求前，若 Step 配置了 AuthAK，通过 CredentialStore 查出 SK，自动调用 `auth.Signer.Sign` 签名
+- AuthAK 为空的 Step 行为与现有完全一致（零破坏）
+- 签名失败（包括 AK 查不到凭证）为 fatal 错误（不重试）
+- Poller 中 Poll 签名失败作为终态错误处理，不进行瞬态重试
 
 **Non-Goals:**
 - 不支持 Bearer Token / OAuth 等其他认证方式（可未来扩展）
-- 不实现 AK/SK 存储或轮换机制
+- 不实现 AK/SK 轮换机制（但本方案天然支持运行时凭证更新）
 - 不修改 auth 包本身
 
 ## Decisions
 
-### D1：AK/SK 字段放在 `Step` 上，而非 `ExecutorConfig`
+### D1：AuthAK 字段放在 `Step` 上，而非 `ExecutorConfig`
 
-**决策**：在 `Step` 结构体新增 `AuthAK` / `AuthSK` 字段（string 类型，可选），粒度为单步骤。
+**决策**：在 `Step` 结构体新增 `AuthAK` 字段（string 类型，可选），粒度为单步骤。
 
-**理由**：不同步骤可能调用不同下游服务，各自持有不同凭据。全局 `ExecutorConfig` 级别的配置无法满足多租户或多服务场景，且与现有的步骤自描述设计一致（URL、method 都在步骤上配置）。
+**理由**：不同步骤可能调用不同下游服务，各自持有不同凭据。全局 `ExecutorConfig` 级别的配置无法满足多租户或多服务场景，且与现有的步骤自描述设计一致（URL、method 都在步骤上配置）。同一事务内，部分步骤需要鉴权、部分不需要，通过 Step 级 AuthAK 字段自然支持。
 
-**备选方案**：在 `ExecutorConfig` 加全局 AK/SK → 无法支持步骤间不同凭据，灵活性不足，排除。
-
----
-
-### D2：直接在 `Executor` 内部构造 `auth.Signer`，不注入接口
-
-**决策**：在需要签名时，按需 `auth.NewSigner(step.AuthAK, step.AuthSK)` 创建 Signer 并调用 `Sign(req)`，不引入签名接口抽象。
-
-**理由**：目前只有一种签名方案（NSP-HMAC-SHA256），过早抽象会增加复杂度。`auth.Signer` 已经对 `*http.Request` 操作，测试中可用 `httptest` 验证 header，无需 mock 签名器。
-
-**备选方案**：定义 `RequestSigner interface { Sign(*http.Request) error }` 并注入 → 仅当需要多种签名方案时有价值，当前过度设计，排除。
+**备选方案**：在 `ExecutorConfig` 加全局 AK → 无法支持步骤间不同凭据，灵活性不足，排除。
 
 ---
 
-### D3：签名时机：在 `client.Do(req)` 前统一签名
+### D2：只存 AK，SK 通过 `auth.CredentialStore` 运行时查询
+
+**决策**：`saga_steps` 表只新增 `auth_ak` 一列。SK 不入库，执行时 Executor 通过注入的 `auth.CredentialStore.GetByAK(ak)` 查出完整凭证（含 SK），再构造 Signer 签名。
+
+**理由**：
+- SK 不落盘，彻底消除 DB 明文泄露风险（包括备份、慢查询日志等场景）
+- 复用现有 `auth.CredentialStore` 接口和 `MemoryStore` 实现，不引入新的凭证管理机制
+- 天然支持凭证轮换：运行中通过 `MemoryStore.Add()` 更新 SK，后续步骤自动使用新 SK
+- DB 改动量减半：只加 1 列（vs 原方案 2 列），Store 层每处改动少 1 个字段
+- 消除"半配置"问题：只有 AuthAK 一个字段，不存在"只填了 AK 没填 SK"的歧义
+
+**备选方案**：AK/SK 同时存入 DB → SK 明文入库，需要后续引入应用层加密（AES-GCM + envelope encryption），复杂度高，且无法利用现有 CredentialStore 架构，排除。
+
+**约束**：凭证必须在 Engine 启动前加载到 CredentialStore。对 MemoryStore 来说，即服务启动时先加载凭证，再启动 Engine——这在实际使用中是自然的初始化顺序。
+
+---
+
+### D3：Executor 注入 `auth.CredentialStore`，而非直接构造 Signer
+
+**决策**：`Executor` 新增 `credStore auth.CredentialStore` 字段（可选），通过 `NewExecutor` 参数注入。签名时调用 `credStore.GetByAK(ak)` 获取凭证，再 `auth.NewSigner(cred.AccessKey, cred.SecretKey).Sign(req)`。
+
+**理由**：`Executor` 只知道 AK（来自 DB），需要一个查询 SK 的途径。`CredentialStore` 是 auth 包已有的接口，注入它比在 Step 上存 SK 更干净。credStore 为 nil 时，所有步骤都不签名，完全兼容现有行为。
+
+**备选方案**：在 Step 结构体上同时存 AuthAK + AuthSK → 回到 SK 入库方案，排除（见 D2）。
+
+---
+
+### D4：签名时机：在 `client.Do(req)` 前统一签名
 
 **决策**：在 `ExecuteStep`、`ExecuteAsyncStep`、`CompensateStep`、`Poll` 四个方法中，构造完 `req` 并设置完所有业务 header 后、`client.Do(req)` 前，插入签名调用。
 
@@ -50,44 +68,42 @@ Saga 模块通过 `Executor` 发送三类 HTTP 请求：forward action、compens
 
 ---
 
-### D4：签名失败的处理
+### D5：签名失败的处理
 
-**决策**：签名失败（`signer.Sign` 返回错误）时，直接返回 `ErrStepFatal`（不重试），因为签名失败属于配置级错误，重试无意义。
+**决策**：签名失败（凭证查不到、`signer.Sign` 返回错误）时，直接返回 fatal 错误（不重试），因为签名失败属于配置级错误，重试无意义。
 
-**理由**：nonce 生成失败或 body 读取超限（> 10MB）是确定性错误，重试只会浪费资源。
-
----
-
-### D5：AK/SK 持久化到 `saga_steps` 表
-
-**决策**：在 `saga_steps` 表新增 `auth_ak TEXT NOT NULL DEFAULT ''` 和 `auth_sk TEXT NOT NULL DEFAULT ''` 两列。所有 Store 方法（`CreateSteps`、`CreateTransactionWithSteps` 的 INSERT，`GetSteps`/`GetStep` 的 SELECT，以及 `scanStep`/`scanStepRow` 的 Scan）均需同步更新。
-
-**理由**：Saga 执行路径在 `Submit` 后完全由 DB 驱动——coordinator 和 poller 通过 `GetSteps`/`GetStep` 加载步骤。若不持久化，工作进程读到的 Step 永远是空凭据，签名逻辑永远不会触发，功能实际失效。`DEFAULT ''` 确保存量行（`auth_ak = ''`、`auth_sk = ''`）被 Executor 识别为"不鉴权"，零迁移成本。使用 `TEXT` 而非 `VARCHAR(N)` 是因为 `auth` 包的 `Credential` 结构体对 AK/SK 长度无约束，且 PostgreSQL 中两者存储和性能完全一致，避免引入不必要的长度限制。
+**理由**：AK 不存在于 CredentialStore、凭证被禁用、nonce 生成失败、body 超限等都是确定性错误，重试只会浪费资源。
 
 ---
 
-### D6：半配置（只填 AK 或只填 SK）在 `Build()` fail-fast
+### D6：Poller 中 Poll 签名失败作为终态错误
 
-**决策**：在 `SagaBuilder.Build()` 的步骤校验循环中，检测 `(AuthAK == '') != (AuthSK == '')` 的情况，返回新的哨兵错误 `ErrStepPartialAuth`。
+**决策**：在 `poller.processPollTask` 中，当 `Poll` 返回签名错误时，走 `handlePollFailure` 路径（标记 step failed → 删除 poll task → 通知 coordinator 触发补偿），而非 `releasePollTask`（释放锁等待下次重试）。
 
-**理由**：把"只填了一个字段"当作"不鉴权"静默处理，会把凭据注入失误转变为静默的鉴权禁用，下游调用方收到 401 却难以定位根因。`Build()` 是用户唯一的配置入口，在此 reject 是成本最低的防线，且不影响运行时路径。
+**理由**：当前 `processPollTask` 对所有 `Poll` 错误一律走 `releasePollTask`（瞬态重试），但签名失败是确定性的，重试永远不会成功。若不区分处理，事务会永远卡在 `polling` 状态，永远不会触发补偿。通过 `ErrSigningFailed` 哨兵错误或 `IsSigningError(err)` 辅助函数区分签名错误和瞬态 HTTP 错误。
 
-**备选方案**：在 `Executor.signRequestIfNeeded` 里检测并返回 fatal → 错误发现延迟到执行期，且无法在提交前捕获，调试成本更高，排除。
+---
+
+### D7：`Engine.Submit` 可选 fail-fast 校验
+
+**决策**：在 `Engine.Submit()` 中，若 CredentialStore 可用，对每个 AuthAK 非空的 Step 调用 `credStore.GetByAK(ak)` 校验凭证是否存在且启用。校验失败时返回错误，不创建事务。
+
+**理由**：把 AK 无效的错误提前到提交阶段，比等到异步执行时才发现更易调试。`Build()` 无法做此校验（不持有 CredentialStore），`Submit()` 是最早的可校验时机。
 
 ## Risks / Trade-offs
 
-- **SK 明文存储在 DB**：`auth_sk` 列以明文存储。→ 缓解：调用方可通过 KMS/Vault 在运行时注入；DB 层可在应用层加密后存储；本模块不负责凭据生命周期管理。
+- **CredentialStore 可用性依赖**：执行时 CredentialStore 必须包含对应 AK 的凭证。若凭证在 Saga 执行期间被删除或禁用，后续步骤签名失败，触发补偿。这实际上是合理的安全行为——凭证被撤销就应该停止使用。
 - **body 被 Sign 读取并重置**：`auth.Signer.Sign` 内部读取并重置 body（通过 `NopCloser`），若 body 超过 10MB 会报错。→ 缓解：Saga payload 通常远小于 10MB；`Sign` 已有 `ErrBodyTooLarge` 保护。
-- **Store 方法改动范围**：需同步修改 4 个 INSERT/SELECT/Scan 路径，遗漏任何一处都会导致读回空凭据。→ 缓解：task 中逐一明确列出，测试验证 round-trip（写入再读出）后凭据一致。
+- **Store 方法改动范围**：需同步修改 6 处 INSERT/SELECT/Scan 路径（每处只加 1 个字段）。→ 缓解：task 中逐一明确列出，测试验证 round-trip（写入再读出）后 AuthAK 一致。
 
 ## Migration Plan
 
-1. 运行 `saga/migrations/saga.sql` 中新增的 ALTER TABLE 语句，为线上 `saga_steps` 表添加两列（`TEXT NOT NULL DEFAULT ''` 保证存量行兼容）。
-2. 部署新代码：存量步骤 `auth_ak = ''`/`auth_sk = ''`，Executor 跳过签名，行为与变更前完全一致。
-3. 新增需要鉴权的步骤时，填入 `AuthAK`/`AuthSK` 即可。
-4. 回滚：回滚代码，新列对旧代码无副作用（SELECT 不包含新列时忽略）；如需清理列，单独执行 DROP COLUMN（生产环境需评估）。
+1. 运行 `saga/migrations/saga.sql` 中新增的 ALTER TABLE 语句，为线上 `saga_steps` 表添加一列（`TEXT NOT NULL DEFAULT ''` 保证存量行兼容）。
+2. 部署新代码，`Engine.Config` 中配置 `CredentialStore`（如 `auth.MemoryStore`），在启动时加载凭证。
+3. 存量步骤 `auth_ak = ''`，Executor 跳过签名，行为与变更前完全一致。
+4. 新增需要鉴权的步骤时，填入 `AuthAK` 即可。
+5. 回滚：回滚代码，新列对旧代码无副作用（SELECT 不包含新列时忽略）；如需清理列，单独执行 DROP COLUMN（生产环境需评估）。
 
 ## Open Questions
 
-- **SK 明文存储的安全加固（Phase 2）**：当前 `auth_sk` 列以明文存储，属于有意的 MVP 简化。后续应在 Store 层为 `auth_sk` 列增加应用层加密（AES-GCM + envelope encryption），或改为只存加密后的 ciphertext + key reference。此外，数据库备份和慢查询日志中可能泄露 SK 明文，需配合 DB 层审计策略一并考虑。此项作为后续独立 change 跟踪。
-- AK/SK 轮换和密钥生命周期管理超出本次范围，可作为后续独立 change。
+- AK/SK 轮换和密钥生命周期管理超出本次范围，可作为后续独立 change。但本方案通过 CredentialStore 运行时查询 SK，天然支持在不停机的情况下更新凭证。
