@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
@@ -25,6 +26,8 @@ var (
 	ErrStepFatal = errors.New("step failed, no more retries")
 	// ErrCompensationFailed indicates compensation failed.
 	ErrCompensationFailed = errors.New("compensation failed")
+	// ErrSigningFailed indicates request signing failed.
+	ErrSigningFailed = errors.New("request signing failed")
 )
 
 // ExecutorConfig holds configuration for the Executor.
@@ -42,13 +45,14 @@ func DefaultExecutorConfig() *ExecutorConfig {
 
 // Executor handles HTTP calls for SAGA step execution and compensation.
 type Executor struct {
-	client *http.Client
-	store  Store
-	config *ExecutorConfig
+	client    *http.Client
+	store     Store
+	config    *ExecutorConfig
+	credStore auth.CredentialStore
 }
 
 // NewExecutor creates a new Executor with the given store and configuration.
-func NewExecutor(store Store, cfg *ExecutorConfig) *Executor {
+func NewExecutor(store Store, cfg *ExecutorConfig, credStore auth.CredentialStore) *Executor {
 	if cfg == nil {
 		cfg = DefaultExecutorConfig()
 	}
@@ -57,8 +61,9 @@ func NewExecutor(store Store, cfg *ExecutorConfig) *Executor {
 		client: &http.Client{
 			Timeout: cfg.HTTPTimeout,
 		},
-		store:  store,
-		config: cfg,
+		store:     store,
+		config:    cfg,
+		credStore: credStore,
 	}
 }
 
@@ -111,6 +116,15 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 	}
 	if tc != nil {
 		trace.Inject(req, tc)
+	}
+
+	if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
+		if updateErr := e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
+			return fmt.Errorf("failed to update step status after signing error: %w", updateErr)
+		}
+		step.Status = StepStatusFailed
+		step.LastError = err.Error()
+		return fmt.Errorf("%w: %v", ErrStepFatal, err)
 	}
 
 	// Execute HTTP request
@@ -206,6 +220,15 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 	}
 	if tc != nil {
 		trace.Inject(req, tc)
+	}
+
+	if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
+		if updateErr := e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
+			return fmt.Errorf("failed to update step status after signing error: %w", updateErr)
+		}
+		step.Status = StepStatusFailed
+		step.LastError = err.Error()
+		return fmt.Errorf("%w: %v", ErrStepFatal, err)
 	}
 
 	// Execute HTTP request
@@ -333,6 +356,11 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 			trace.Inject(req, tc)
 		}
 
+		if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
+			lastErr = err
+			break
+		}
+
 		// Execute HTTP request
 		resp, err := e.client.Do(req)
 		if err != nil {
@@ -363,6 +391,9 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 	// All retries exhausted
 	errMsg := fmt.Sprintf("compensation failed after %d retries: %v", maxRetries, lastErr)
 	e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, errMsg)
+	if lastErr != nil {
+		return fmt.Errorf("%s: %w: %w", errMsg, ErrCompensationFailed, lastErr)
+	}
 	return fmt.Errorf("%s: %w", errMsg, ErrCompensationFailed)
 }
 
@@ -421,6 +452,10 @@ func (e *Executor) Poll(ctx context.Context, tx *Transaction, step *Step, allSte
 		trace.Inject(req, tc)
 	}
 
+	if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
+		return nil, err
+	}
+
 	// Execute HTTP request
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -472,4 +507,29 @@ func extractTraceFromPayload(payload map[string]any) *trace.TraceContext {
 	}
 
 	return tc
+}
+
+func (e *Executor) signRequestIfNeeded(ctx context.Context, step *Step, req *http.Request) error {
+	if step == nil || step.AuthAK == "" || e.credStore == nil {
+		return nil
+	}
+
+	cred, err := e.credStore.GetByAK(ctx, step.AuthAK)
+	if err != nil {
+		return fmt.Errorf("%w: credential lookup failed for AK %q: %v", ErrSigningFailed, step.AuthAK, err)
+	}
+	if cred == nil || !cred.Enabled {
+		return fmt.Errorf("%w: credential not found or disabled for AK %q", ErrSigningFailed, step.AuthAK)
+	}
+
+	if err := auth.NewSigner(cred.AccessKey, cred.SecretKey).Sign(req); err != nil {
+		return fmt.Errorf("%w: %v", ErrSigningFailed, err)
+	}
+
+	return nil
+}
+
+// IsSigningError reports whether err was caused by request signing failure.
+func IsSigningError(err error) bool {
+	return errors.Is(err, ErrSigningFailed)
 }

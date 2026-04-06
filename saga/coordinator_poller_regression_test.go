@@ -18,7 +18,7 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func newExecutorWithResponder(store Store, responder roundTripFunc) *Executor {
-	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second})
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
 	executor.client = &http.Client{Transport: responder}
 	return executor
 }
