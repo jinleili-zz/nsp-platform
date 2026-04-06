@@ -255,6 +255,33 @@ func TestCompensateAndPollRequestsAreSignedWhenAuthAKConfigured(t *testing.T) {
 	}
 }
 
+func TestCompensateStepSigningFailurePreservesSigningError(t *testing.T) {
+	store := newRegressionStore()
+	executor := newAuthTestExecutor(store, auth.NewMemoryStore(nil))
+
+	tx := &Transaction{ID: "tx-comp-sign-fail", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-comp-sign-fail",
+		TransactionID:    tx.ID,
+		Name:             "comp-sign-fail",
+		Type:             StepTypeSync,
+		Status:           StepStatusSucceeded,
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://example.com/compensate",
+		MaxRetry:         1,
+		AuthAK:           "missing-ak",
+	}
+	store.put(tx, step)
+
+	err := executor.CompensateStep(context.Background(), tx, step, []*Step{step})
+	if !errors.Is(err, ErrCompensationFailed) {
+		t.Fatalf("expected ErrCompensationFailed, got %v", err)
+	}
+	if !errors.Is(err, ErrSigningFailed) {
+		t.Fatalf("expected ErrSigningFailed to be preserved, got %v", err)
+	}
+}
+
 func TestPostgresStorePersistsAuthAKRoundTrip(t *testing.T) {
 	db := setupTestDB(t)
 	if _, err := db.Exec(`ALTER TABLE saga_steps ADD COLUMN IF NOT EXISTS auth_ak TEXT NOT NULL DEFAULT ''`); err != nil {

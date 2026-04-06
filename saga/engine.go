@@ -214,6 +214,9 @@ func (e *Engine) Stop() error {
 }
 
 // Submit submits a SAGA transaction definition for execution.
+// When CredentialStore is configured, it performs a best-effort fail-fast
+// validation for non-empty AuthAK values before persisting the transaction.
+// Credential changes after Submit may still cause later execution-time signing failures.
 // Returns the generated transaction ID.
 func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error) {
 	if def == nil {

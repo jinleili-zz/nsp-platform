@@ -391,6 +391,9 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 	// All retries exhausted
 	errMsg := fmt.Sprintf("compensation failed after %d retries: %v", maxRetries, lastErr)
 	e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, errMsg)
+	if lastErr != nil {
+		return fmt.Errorf("%s: %w: %w", errMsg, ErrCompensationFailed, lastErr)
+	}
 	return fmt.Errorf("%s: %w", errMsg, ErrCompensationFailed)
 }
 
