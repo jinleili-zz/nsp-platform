@@ -79,6 +79,9 @@ type Step struct {
 	ActionPayload map[string]any
 	// ActionResponse stores the response from the forward action.
 	ActionResponse map[string]any
+	// AuthAK enables NSP-HMAC-SHA256 signing when non-empty.
+	// The corresponding SK is resolved at runtime via auth.CredentialStore.
+	AuthAK string
 
 	// CompensateMethod is the HTTP method for the compensation action.
 	CompensateMethod string

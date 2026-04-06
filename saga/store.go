@@ -130,8 +130,8 @@ func (s *PostgresStore) CreateTransactionWithSteps(ctx context.Context, tx *Tran
 				compensate_method, compensate_url, compensate_payload,
 				poll_url, poll_method, poll_interval_sec, poll_max_times,
 				poll_success_path, poll_success_value, poll_failure_path, poll_failure_value,
-				max_retry
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+				max_retry, auth_ak
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		`
 
 		stmt, err := dbTx.PrepareContext(ctx, stepQuery)
@@ -173,6 +173,7 @@ func (s *PostgresStore) CreateTransactionWithSteps(ctx context.Context, tx *Tran
 				step.PollFailurePath,
 				step.PollFailureValue,
 				step.MaxRetry,
+				step.AuthAK,
 			)
 			if err != nil {
 				return fmt.Errorf("failed to create step %s: %w", step.ID, err)
@@ -301,8 +302,8 @@ func (s *PostgresStore) CreateSteps(ctx context.Context, steps []*Step) error {
 			compensate_method, compensate_url, compensate_payload,
 			poll_url, poll_method, poll_interval_sec, poll_max_times,
 			poll_success_path, poll_success_value, poll_failure_path, poll_failure_value,
-			max_retry
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+			max_retry, auth_ak
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 	`
 
 	stmt, err := dbTx.PrepareContext(ctx, query)
@@ -344,6 +345,7 @@ func (s *PostgresStore) CreateSteps(ctx context.Context, steps []*Step) error {
 			step.PollFailurePath,
 			step.PollFailureValue,
 			step.MaxRetry,
+			step.AuthAK,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create step %s: %w", step.ID, err)
@@ -365,7 +367,7 @@ func (s *PostgresStore) GetSteps(ctx context.Context, txID string) ([]*Step, err
 			compensate_method, compensate_url, compensate_payload,
 			poll_url, poll_method, poll_interval_sec, poll_max_times, poll_count,
 			poll_success_path, poll_success_value, poll_failure_path, poll_failure_value,
-			next_poll_at, retry_count, max_retry, last_error, started_at, finished_at
+			next_poll_at, retry_count, max_retry, last_error, started_at, finished_at, auth_ak
 		FROM saga_steps
 		WHERE transaction_id = $1
 		ORDER BY step_index
@@ -401,7 +403,7 @@ func (s *PostgresStore) GetStep(ctx context.Context, stepID string) (*Step, erro
 			compensate_method, compensate_url, compensate_payload,
 			poll_url, poll_method, poll_interval_sec, poll_max_times, poll_count,
 			poll_success_path, poll_success_value, poll_failure_path, poll_failure_value,
-			next_poll_at, retry_count, max_retry, last_error, started_at, finished_at
+			next_poll_at, retry_count, max_retry, last_error, started_at, finished_at, auth_ak
 		FROM saga_steps
 		WHERE id = $1
 	`
@@ -453,6 +455,7 @@ func scanStep(rows *sql.Rows) (*Step, error) {
 		&lastError,
 		&step.StartedAt,
 		&step.FinishedAt,
+		&step.AuthAK,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan step: %w", err)
@@ -523,6 +526,7 @@ func scanStepRow(row *sql.Row) (*Step, error) {
 		&lastError,
 		&step.StartedAt,
 		&step.FinishedAt,
+		&step.AuthAK,
 	)
 	if err != nil {
 		return nil, err

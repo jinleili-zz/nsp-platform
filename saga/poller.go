@@ -208,6 +208,10 @@ func (p *Poller) processPollTask(ctx context.Context, task *PollTask) {
 	response, err := p.executor.Poll(ctx, tx, step, allSteps)
 	if err != nil {
 		fmt.Printf("poll request failed for step %s: %v\n", step.ID, err)
+		if IsSigningError(err) {
+			p.handlePollFailure(ctx, task, step, err.Error())
+			return
+		}
 		p.releasePollTask(ctx, task.StepID)
 		return
 	}
@@ -228,7 +232,7 @@ func (p *Poller) processPollTask(ctx context.Context, task *PollTask) {
 
 	if failure {
 		// Poll explicitly failed
-		p.handlePollFailure(ctx, task, step)
+		p.handlePollFailure(ctx, task, step, "poll returned failure value")
 		return
 	}
 
@@ -265,9 +269,9 @@ func (p *Poller) handlePollSuccess(ctx context.Context, task *PollTask, step *St
 }
 
 // handlePollFailure handles an explicit poll failure.
-func (p *Poller) handlePollFailure(ctx context.Context, task *PollTask, step *Step) {
+func (p *Poller) handlePollFailure(ctx context.Context, task *PollTask, step *Step, lastError string) {
 	// Update step status to failed
-	if err := p.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, "poll returned failure value"); err != nil {
+	if err := p.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, lastError); err != nil {
 		fmt.Printf("failed to update step status to failed: %v\n", err)
 	}
 

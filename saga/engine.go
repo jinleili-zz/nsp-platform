@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jinleili-zz/nsp-platform/auth"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
@@ -30,6 +31,8 @@ type Config struct {
 	HTTPTimeout time.Duration
 	// InstanceID is the unique identifier for this instance (auto-generated if empty).
 	InstanceID string
+	// CredentialStore resolves AK credentials for optional outbound request signing.
+	CredentialStore auth.CredentialStore
 }
 
 // DefaultConfig returns the default engine configuration.
@@ -146,7 +149,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 	executorCfg := &ExecutorConfig{
 		HTTPTimeout: cfg.HTTPTimeout,
 	}
-	executor := NewExecutor(store, executorCfg)
+	executor := NewExecutor(store, executorCfg, cfg.CredentialStore)
 
 	pollerCfg := &PollerConfig{
 		ScanInterval: cfg.PollScanInterval,
@@ -217,6 +220,22 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 		return "", fmt.Errorf("saga definition is required")
 	}
 
+	if e.config != nil && e.config.CredentialStore != nil {
+		for _, step := range def.Steps {
+			if step.AuthAK == "" {
+				continue
+			}
+
+			cred, err := e.config.CredentialStore.GetByAK(ctx, step.AuthAK)
+			if err != nil {
+				return "", fmt.Errorf("failed to validate AuthAK %q: %w", step.AuthAK, err)
+			}
+			if cred == nil || !cred.Enabled {
+				return "", fmt.Errorf("credential not found or disabled for AuthAK %q", step.AuthAK)
+			}
+		}
+	}
+
 	// Generate transaction ID
 	txID := uuid.New().String()
 	def.ID = txID
@@ -276,6 +295,7 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 			PollFailurePath:   stepDef.PollFailurePath,
 			PollFailureValue:  stepDef.PollFailureValue,
 			MaxRetry:          stepDef.MaxRetry,
+			AuthAK:            stepDef.AuthAK,
 		}
 	}
 
