@@ -15,7 +15,7 @@
 - [x] 3.3 新增测试：注入自定义 HTTPClient 时，补偿请求（`CompensateStep`）使用该 client
 - [x] 3.4 新增测试：注入自定义 HTTPClient 时，轮询请求（`Poll`）使用该 client
 - [x] 3.5 新增测试：未传入 HTTPClient（nil）时保持默认 client 创建行为
-- [ ] 3.6 运行现有全量测试，确认无回归
+- [x] 3.6 运行现有全量测试，确认无回归
 
 ## 4. 文档同步更新
 
