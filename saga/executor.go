@@ -34,6 +34,9 @@ var (
 type ExecutorConfig struct {
 	// HTTPTimeout is the timeout for a single HTTP request (default: 30s).
 	HTTPTimeout time.Duration
+	// HTTPClient is the optional custom HTTP client used for all outbound requests.
+	// When non-nil, HTTPTimeout is ignored.
+	HTTPClient *http.Client
 }
 
 // DefaultExecutorConfig returns the default executor configuration.
@@ -57,10 +60,15 @@ func NewExecutor(store Store, cfg *ExecutorConfig, credStore auth.CredentialStor
 		cfg = DefaultExecutorConfig()
 	}
 
-	return &Executor{
-		client: &http.Client{
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{
 			Timeout: cfg.HTTPTimeout,
-		},
+		}
+	}
+
+	return &Executor{
+		client:    client,
 		store:     store,
 		config:    cfg,
 		credStore: credStore,

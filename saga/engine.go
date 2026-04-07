@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -29,6 +30,9 @@ type Config struct {
 	CoordScanInterval time.Duration
 	// HTTPTimeout is the timeout for HTTP requests (default: 30s).
 	HTTPTimeout time.Duration
+	// HTTPClient is the optional custom HTTP client used for all outbound requests.
+	// When non-nil, HTTPTimeout is ignored.
+	HTTPClient *http.Client
 	// InstanceID is the unique identifier for this instance (auto-generated if empty).
 	InstanceID string
 	// CredentialStore resolves AK credentials for optional outbound request signing.
@@ -148,6 +152,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 
 	executorCfg := &ExecutorConfig{
 		HTTPTimeout: cfg.HTTPTimeout,
+		HTTPClient:  cfg.HTTPClient,
 	}
 	executor := NewExecutor(store, executorCfg, cfg.CredentialStore)
 

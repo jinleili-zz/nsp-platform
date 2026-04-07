@@ -605,12 +605,14 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string)
 - PollScanInterval time.Duration   // Poller 扫描间隔，默认 3s
 - CoordScanInterval time.Duration  // Coordinator 扫描间隔，默认 5s
 - HTTPTimeout      time.Duration   // 单次 HTTP 调用超时，默认 30s
+- HTTPClient       *http.Client    // 可选，自定义出站 HTTP client；非 nil 时忽略 HTTPTimeout
 - InstanceID       string          // 实例唯一标识，空则自动生成（hostname+pid）
+- CredentialStore  auth.CredentialStore // 可选，用于步骤出站请求的 AK/SK 签名
 
 定义 Engine 结构体，对外暴露以下方法：
 
 // NewEngine 初始化引擎（建立 DB 连接，不启动后台任务）
-func NewEngine(cfg Config) (*Engine, error)
+func NewEngine(cfg *Config) (*Engine, error)
 
 // Start 启动后台 goroutine（Coordinator + Poller）
 // 传入的 ctx cancel 后，所有后台任务优雅退出
