@@ -1,6 +1,6 @@
 # Saga 模块
 
-> 包路径：`github.com/paic/nsp-common/pkg/saga`
+> 包路径：`github.com/jinleili-zz/nsp-platform/saga`
 
 ## 功能说明
 
@@ -93,7 +93,9 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 | `PollScanInterval` | `time.Duration` | `3s` | 轮询器扫描间隔 |
 | `CoordScanInterval` | `time.Duration` | `5s` | 协调器扫描间隔 |
 | `HTTPTimeout` | `time.Duration` | `30s` | HTTP 调用超时 |
+| `HTTPClient` | `*http.Client` | `nil` | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
 | `InstanceID` | `string` | 自动生成 | 实例唯一标识 |
+| `CredentialStore` | `auth.CredentialStore` | `nil` | 可选，用于步骤出站 AK/SK 签名 |
 
 ### Step 配置
 
@@ -137,7 +139,7 @@ import (
     "time"
 
     _ "github.com/lib/pq"
-    "github.com/paic/nsp-common/pkg/saga"
+    "github.com/jinleili-zz/nsp-platform/saga"
 )
 
 func main() {
@@ -163,6 +165,21 @@ func main() {
     select {}
 }
 ```
+
+### 注入自定义 HTTP Client
+
+```go
+customClient := &http.Client{
+    Timeout: 10 * time.Second,
+}
+
+engine, err := saga.NewEngine(&saga.Config{
+    DSN:        "postgres://user:pass@localhost:5432/nsp?sslmode=disable",
+    HTTPClient: customClient,
+})
+```
+
+当 `HTTPClient` 非 nil 时，SAGA 的 action、compensation 和 poll 请求都会复用该 client，`HTTPTimeout` 配置会被忽略。
 
 ### 同步步骤事务
 

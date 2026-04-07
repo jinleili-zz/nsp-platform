@@ -150,7 +150,7 @@ psql -h localhost -U saga -d saga_test -f migrations/saga.sql
 ### 1. 初始化引擎
 
 ```go
-import "github.com/paic/nsp-common/pkg/saga"
+import "github.com/jinleili-zz/nsp-platform/saga"
 
 // 创建引擎
 engine, err := saga.NewEngine(&saga.Config{
@@ -173,6 +173,21 @@ if err := engine.Start(ctx); err != nil {
 // 程序退出时停止引擎
 defer engine.Stop()
 ```
+
+### 使用自定义 HTTP Client
+
+```go
+customClient := &http.Client{
+    Timeout: 10 * time.Second,
+}
+
+engine, err := saga.NewEngine(&saga.Config{
+    DSN:        "postgres://user:pass@localhost:5432/dbname?sslmode=disable",
+    HTTPClient: customClient,
+})
+```
+
+当 `HTTPClient` 非 nil 时，SAGA 的同步步骤、异步步骤、补偿和轮询请求都会复用该 client，`HTTPTimeout` 不再生效。
 
 ### 2. 定义同步事务
 
@@ -359,6 +374,7 @@ PollSuccessValue: "success"
 | `PollScanInterval` | Duration | 3s | 轮询扫描间隔 |
 | `CoordScanInterval` | Duration | 5s | 协调器扫描间隔 |
 | `HTTPTimeout` | Duration | 30s | HTTP 请求超时时间 |
+| `HTTPClient` | `*http.Client` | nil | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
 | `InstanceID` | string | auto | 实例 ID (自动生成: hostname-pid) |
 | `LeaseDuration` | Duration | 5m | 分布式锁租约时长 (Coordinator 内部配置) |
 
