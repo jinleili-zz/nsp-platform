@@ -73,10 +73,19 @@
 **选择**：直接注入 `*http.Client` 实例，不提供 `func() *http.Client` 等工厂接口
 
 **理由**：
-- 证书热更新场景下，业务方可通过自定义 `http.Transport`（配合 `tls.Config.GetCertificate`
-  或定期替换 Engine 实例）实现，不需要平台层提供动态 client 刷新机制
+- 本方案注入的是一个静态 `*http.Client` 实例，`NewExecutor()` 保存其引用后在整个
+  Engine 生命周期内复用。如果底层证书或 CA 文件发生轮换，该 client 不会自动感知。
+- 业务方可通过以下**客户端侧**机制实现出站证书/CA 热更新（均由业务仓库负责）：
+  1. 自定义 `http.RoundTripper` wrapper：每次 `RoundTrip()` 调用时读取最新的
+     `tls.Config`（或原子替换内部 Transport）。这是推荐方式，对平台层完全透明。
+  2. 停止旧 Engine、用新 client 重建 Engine：适用于证书轮换频率低的场景。
+- 注意：`tls.Config.GetCertificate` / `GetClientCertificate` 是 TLS 握手回调，
+  其中 `GetCertificate` 是**服务端侧**回调，不适用于出站 client 场景。
+  `GetClientCertificate` 可用于 mTLS 客户端证书轮换，但 Root CA 轮换仍需替换 Transport。
+  本 proposal 不承诺平台层解决证书热更新，业务方需自行选择合适机制。
 - 保持 API 简单，一个字段解决问题
-- 如果未来确实需要动态刷新，可以用后续 proposal 增加，不阻塞当前需求
+- 如果未来确实需要平台层提供动态刷新（如 `func() *http.Client` 工厂），
+  可通过后续 proposal 增加，不阻塞当前需求
 
 ## Risks / Trade-offs
 

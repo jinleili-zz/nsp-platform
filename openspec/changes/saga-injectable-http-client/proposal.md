@@ -29,4 +29,9 @@
 - **API 变更**：`saga.Config` 和 `ExecutorConfig` 各新增一个可选字段，零值行为与当前完全一致，**不是 breaking change**
 - **依赖关系**：无新增外部依赖，仍使用标准库 `net/http`
 - **现有测试**：不受影响，未传入 HTTPClient 时行为不变
+- **文档同步更新**：新增导出 API 字段需同步更新以下文档：
+  - `AGENTS.md` — SAGA 模块说明部分
+  - `docs/saga.md` — SAGA 用户文档
+  - `docs/modules/saga.md` — 模块级文档
+  - `saga/README.md` — 包级 README
 - **下游业务**：`vpc_workflow_demo` 等需要 HTTPS 的业务仓库可在构造 `saga.Config` 时传入自定义 client
