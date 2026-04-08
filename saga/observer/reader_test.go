@@ -145,6 +145,9 @@ func TestReaderGetTransactionDetail(t *testing.T) {
 	if detail.Steps[1].Status != "compensated" {
 		t.Fatalf("expected compensated step, got %q", detail.Steps[1].Status)
 	}
+	if beginCalls := scriptedBeginCalls(t, db); beginCalls != 1 {
+		t.Fatalf("expected one snapshot transaction, got %d", beginCalls)
+	}
 }
 
 var (
@@ -157,6 +160,7 @@ var (
 type scriptedScenario struct {
 	mu        sync.Mutex
 	responses []scriptedResponse
+	beginTx   int
 }
 
 type scriptedResponse struct {
@@ -200,6 +204,41 @@ func openScriptedDB(t *testing.T, responses []scriptedResponse) (*sql.DB, func()
 	}
 }
 
+func scriptedBeginCalls(t *testing.T, db *sql.DB) int {
+	t.Helper()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("db.Conn() error = %v", err)
+	}
+	defer conn.Close()
+
+	var beginCalls int
+	err = conn.Raw(func(driverConn any) error {
+		scripted, ok := driverConn.(*scriptedConn)
+		if !ok {
+			return fmt.Errorf("unexpected driver conn type %T", driverConn)
+		}
+
+		scriptedRegistryMu.Lock()
+		scenario := scriptedRegistry[scripted.key]
+		scriptedRegistryMu.Unlock()
+		if scenario == nil {
+			return fmt.Errorf("missing scripted scenario")
+		}
+
+		scenario.mu.Lock()
+		beginCalls = scenario.beginTx
+		scenario.mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("conn.Raw() error = %v", err)
+	}
+
+	return beginCalls
+}
+
 type scriptedDriver struct{}
 
 func (scriptedDriver) Open(name string) (driver.Conn, error) {
@@ -217,7 +256,21 @@ func (c *scriptedConn) Prepare(string) (driver.Stmt, error) {
 func (c *scriptedConn) Close() error { return nil }
 
 func (c *scriptedConn) Begin() (driver.Tx, error) {
-	return nil, fmt.Errorf("Begin not supported")
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c *scriptedConn) BeginTx(_ context.Context, _ driver.TxOptions) (driver.Tx, error) {
+	scriptedRegistryMu.Lock()
+	scenario := scriptedRegistry[c.key]
+	scriptedRegistryMu.Unlock()
+	if scenario == nil {
+		return nil, fmt.Errorf("missing scripted scenario")
+	}
+
+	scenario.mu.Lock()
+	scenario.beginTx++
+	scenario.mu.Unlock()
+	return scriptedTx{}, nil
 }
 
 func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
@@ -248,6 +301,12 @@ func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.
 }
 
 func (c *scriptedConn) CheckNamedValue(*driver.NamedValue) error { return nil }
+
+type scriptedTx struct{}
+
+func (scriptedTx) Commit() error { return nil }
+
+func (scriptedTx) Rollback() error { return nil }
 
 type scriptedRows struct {
 	columns []string

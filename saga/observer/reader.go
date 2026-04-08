@@ -200,6 +200,15 @@ func (r *Reader) ListFailedTransactions(ctx context.Context, limit int) (*ListRe
 
 // GetTransactionDetail returns a single transaction detail plus ordered steps.
 func (r *Reader) GetTransactionDetail(ctx context.Context, txID string) (*TransactionDetail, error) {
+	readTx, err := r.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelRepeatableRead,
+		ReadOnly:  true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction detail snapshot: %w", err)
+	}
+	defer readTx.Rollback()
+
 	txQuery := `
 		SELECT id, status, current_step, created_at, updated_at, finished_at, timeout_at, last_error,
 		       payload->>'_trace_id' AS trace_id, locked_by, locked_until, payload->>'_span_id' AS span_id
@@ -208,7 +217,7 @@ func (r *Reader) GetTransactionDetail(ctx context.Context, txID string) (*Transa
 	`
 
 	var detail TransactionDetail
-	row := r.db.QueryRowContext(ctx, txQuery, txID)
+	row := readTx.QueryRowContext(ctx, txQuery, txID)
 	spanID, err := scanTransactionDetailRow(row, &detail.Summary)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -228,7 +237,7 @@ func (r *Reader) GetTransactionDetail(ctx context.Context, txID string) (*Transa
 		ORDER BY s.step_index
 	`
 
-	rows, err := r.db.QueryContext(ctx, stepQuery, txID)
+	rows, err := readTx.QueryContext(ctx, stepQuery, txID)
 	if err != nil {
 		return nil, fmt.Errorf("get transaction steps: %w", err)
 	}
@@ -243,6 +252,10 @@ func (r *Reader) GetTransactionDetail(ctx context.Context, txID string) (*Transa
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("get transaction steps rows: %w", err)
+	}
+
+	if err := readTx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction detail snapshot: %w", err)
 	}
 
 	return &detail, nil

@@ -72,7 +72,47 @@ func (a *app) run(args []string) error {
 		return errors.New("missing subcommand")
 	}
 
-	effectiveDSN := strings.TrimSpace(*dsn)
+	switch subArgs[0] {
+	case "list":
+		status, limit, err := a.parseListArgs(subArgs[1:])
+		if err != nil {
+			return err
+		}
+		return a.withObserver(*dsn, func(ctx context.Context, svc observerService) error {
+			return a.execList(ctx, svc, status, limit)
+		})
+	case "failed":
+		limit, err := a.parseFailedArgs(subArgs[1:])
+		if err != nil {
+			return err
+		}
+		return a.withObserver(*dsn, func(ctx context.Context, svc observerService) error {
+			return a.execFailed(ctx, svc, limit)
+		})
+	case "show":
+		txID, err := a.parseShowArgs(subArgs[1:])
+		if err != nil {
+			return err
+		}
+		return a.withObserver(*dsn, func(ctx context.Context, svc observerService) error {
+			return a.execShow(ctx, svc, txID)
+		})
+	case "watch":
+		txID, interval, err := a.parseWatchArgs(subArgs[1:])
+		if err != nil {
+			return err
+		}
+		return a.withObserver(*dsn, func(ctx context.Context, svc observerService) error {
+			return a.execWatch(ctx, svc, txID, interval)
+		})
+	default:
+		a.printRootUsage()
+		return fmt.Errorf("unknown subcommand %q", subArgs[0])
+	}
+}
+
+func (a *app) withObserver(dsnFlag string, run func(context.Context, observerService) error) error {
+	effectiveDSN := strings.TrimSpace(dsnFlag)
 	if effectiveDSN == "" {
 		effectiveDSN = strings.TrimSpace(os.Getenv("SAGA_OBSERVER_DSN"))
 	}
@@ -91,57 +131,53 @@ func (a *app) run(args []string) error {
 		defer closer.Close()
 	}
 
-	switch subArgs[0] {
-	case "list":
-		return a.runList(ctx, svc, subArgs[1:])
-	case "failed":
-		return a.runFailed(ctx, svc, subArgs[1:])
-	case "show":
-		return a.runShow(ctx, svc, subArgs[1:])
-	case "watch":
-		return a.runWatch(ctx, svc, subArgs[1:])
-	default:
-		a.printRootUsage()
-		return fmt.Errorf("unknown subcommand %q", subArgs[0])
-	}
+	return run(ctx, svc)
 }
 
-func (a *app) runList(ctx context.Context, svc observerService, args []string) error {
+func (a *app) parseListArgs(args []string) (string, int, error) {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 
 	status := fs.String("status", "", "Filter by transaction status")
 	limit := fs.Int("limit", observer.DefaultLimit, "Maximum number of rows to return")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return "", 0, err
 	}
 
 	if err := validateStatus(*status); err != nil {
-		return err
+		return "", 0, err
 	}
 
+	return *status, *limit, nil
+}
+
+func (a *app) execList(ctx context.Context, svc observerService, status string, limit int) error {
 	result, err := svc.ListTransactions(ctx, observer.ListFilter{
-		Status: *status,
-		Limit:  *limit,
+		Status: status,
+		Limit:  limit,
 	})
 	if err != nil {
 		return err
 	}
 
-	renderTransactionList(a.out, result, *status)
+	renderTransactionList(a.out, result, status)
 	return nil
 }
 
-func (a *app) runFailed(ctx context.Context, svc observerService, args []string) error {
+func (a *app) parseFailedArgs(args []string) (int, error) {
 	fs := flag.NewFlagSet("failed", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 
 	limit := fs.Int("limit", observer.DefaultLimit, "Maximum number of rows to return")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return 0, err
 	}
 
-	result, err := svc.ListFailedTransactions(ctx, *limit)
+	return *limit, nil
+}
+
+func (a *app) execFailed(ctx context.Context, svc observerService, limit int) error {
+	result, err := svc.ListFailedTransactions(ctx, limit)
 	if err != nil {
 		return err
 	}
@@ -150,46 +186,53 @@ func (a *app) runFailed(ctx context.Context, svc observerService, args []string)
 	return nil
 }
 
-func (a *app) runShow(ctx context.Context, svc observerService, args []string) error {
+func (a *app) parseShowArgs(args []string) (string, error) {
 	fs := flag.NewFlagSet("show", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 
 	if err := fs.Parse(args); err != nil {
-		return err
+		return "", err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("show requires exactly one transaction id")
+		return "", errors.New("show requires exactly one transaction id")
 	}
 
-	detail, err := svc.GetTransactionDetail(ctx, fs.Arg(0))
+	return fs.Arg(0), nil
+}
+
+func (a *app) execShow(ctx context.Context, svc observerService, txID string) error {
+	detail, err := svc.GetTransactionDetail(ctx, txID)
 	if err != nil {
 		return err
 	}
 	if detail == nil {
-		return fmt.Errorf("transaction not found: %s", fs.Arg(0))
+		return fmt.Errorf("transaction not found: %s", txID)
 	}
 
 	io.WriteString(a.out, renderTransactionDetail(detail, false, 0))
 	return nil
 }
 
-func (a *app) runWatch(ctx context.Context, svc observerService, args []string) error {
+func (a *app) parseWatchArgs(args []string) (string, time.Duration, error) {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	fs.SetOutput(a.err)
 
 	interval := fs.Duration("interval", defaultWatchInterval, "Refresh interval")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return "", 0, err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("watch requires exactly one transaction id")
+		return "", 0, errors.New("watch requires exactly one transaction id")
 	}
 	if *interval <= 0 {
-		return errors.New("interval must be positive")
+		return "", 0, errors.New("interval must be positive")
 	}
 
-	txID := fs.Arg(0)
-	ticker := time.NewTicker(*interval)
+	return fs.Arg(0), *interval, nil
+}
+
+func (a *app) execWatch(ctx context.Context, svc observerService, txID string, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -202,7 +245,7 @@ func (a *app) runWatch(ctx context.Context, svc observerService, args []string) 
 		}
 
 		io.WriteString(a.out, "\033[H\033[2J")
-		io.WriteString(a.out, renderTransactionDetail(detail, true, *interval))
+		io.WriteString(a.out, renderTransactionDetail(detail, true, interval))
 
 		select {
 		case <-ctx.Done():

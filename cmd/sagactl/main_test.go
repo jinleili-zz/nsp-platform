@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -175,6 +177,57 @@ func TestAppRunWatch(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "watching transaction tx-watch") {
 		t.Fatalf("expected watch heading in output: %s", output)
+	}
+}
+
+func TestAppRunListHelpDoesNotOpenObserver(t *testing.T) {
+	var out strings.Builder
+	openCalled := false
+	app := newApp(&out, io.Discard, func(context.Context, string) (observerService, io.Closer, error) {
+		openCalled = true
+		return nil, nil, fmt.Errorf("unexpected open")
+	})
+
+	err := app.run([]string{"list", "-h"})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("run() error = %v, want flag.ErrHelp", err)
+	}
+	if openCalled {
+		t.Fatalf("expected help flow to avoid opening observer service")
+	}
+}
+
+func TestAppRunShowBadArgsDoesNotOpenObserver(t *testing.T) {
+	var out strings.Builder
+	openCalled := false
+	app := newApp(&out, io.Discard, func(context.Context, string) (observerService, io.Closer, error) {
+		openCalled = true
+		return nil, nil, fmt.Errorf("unexpected open")
+	})
+
+	err := app.run([]string{"show"})
+	if err == nil || err.Error() != "show requires exactly one transaction id" {
+		t.Fatalf("run() error = %v", err)
+	}
+	if openCalled {
+		t.Fatalf("expected argument validation to avoid opening observer service")
+	}
+}
+
+func TestAppRunUnknownSubcommandDoesNotRequireDSN(t *testing.T) {
+	var out strings.Builder
+	openCalled := false
+	app := newApp(&out, io.Discard, func(context.Context, string) (observerService, io.Closer, error) {
+		openCalled = true
+		return nil, nil, fmt.Errorf("unexpected open")
+	})
+
+	err := app.run([]string{"typo"})
+	if err == nil || err.Error() != `unknown subcommand "typo"` {
+		t.Fatalf("run() error = %v", err)
+	}
+	if openCalled {
+		t.Fatalf("expected unknown subcommand flow to avoid opening observer service")
 	}
 }
 
