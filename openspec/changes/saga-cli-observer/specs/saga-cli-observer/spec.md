@@ -2,15 +2,35 @@
 
 ### Requirement: Observer SHALL list SAGA transactions with operational filters
 The system SHALL provide a CLI command to list persisted SAGA transactions from PostgreSQL using read-only queries.
-The list view MUST support at least filtering by transaction status and sorting by creation time so operators can quickly locate running and failed transactions.
+The list view MUST support filtering by persisted transaction status and MUST default to a bounded result set so operators can quickly locate active and failed transactions without issuing unbounded queries.
 
 #### Scenario: List running transactions
 - **WHEN** the operator runs the list command with a `running` status filter
 - **THEN** the tool MUST display only transactions whose persisted status is `running`
 
+#### Scenario: List compensating transactions
+- **WHEN** the operator runs the list command with a `compensating` status filter
+- **THEN** the tool MUST display only transactions whose persisted status is `compensating`
+
+#### Scenario: List pending transactions
+- **WHEN** the operator runs the list command with a `pending` status filter
+- **THEN** the tool MUST display only transactions whose persisted status is `pending`
+
+#### Scenario: List command uses a bounded default limit
+- **WHEN** the operator runs the list command without an explicit limit
+- **THEN** the tool MUST return only the most recent 100 results by default and MUST provide a way to override that limit explicitly
+
+#### Scenario: List command indicates truncation
+- **WHEN** matching rows exceed the effective result limit
+- **THEN** the tool MUST indicate that the output has been truncated by the current limit
+
 #### Scenario: List recent failed transactions
 - **WHEN** the operator runs the failed shortcut command
-- **THEN** the tool MUST display transactions whose persisted status is `failed`, ordered from newest to oldest
+- **THEN** the tool MUST display transactions whose persisted status is `failed`, ordered by `finished_at` descending and falling back to `updated_at` descending when `finished_at` is unavailable
+
+#### Scenario: Failed command uses a bounded default limit
+- **WHEN** the operator runs the failed command without an explicit limit
+- **THEN** the tool MUST return only the most recent 100 failed transactions by default and MUST provide a way to override that limit explicitly
 
 ### Requirement: Observer SHALL show transaction detail with ordered step state
 The system SHALL provide a detail command that displays a single transaction and its steps using data from `saga_transactions`, `saga_steps`, and `saga_poll_tasks`.
@@ -23,6 +43,10 @@ The detail view MUST show transaction-level status and step-level execution stat
 #### Scenario: Show asynchronous transaction detail
 - **WHEN** the operator requests detail for an existing transaction containing an asynchronous polling step
 - **THEN** the tool MUST display the step's `poll_count`, `poll_max_times`, and the current poll task timing information when present
+
+#### Scenario: Show transaction lock ownership
+- **WHEN** the operator requests detail for a transaction that is currently locked by an engine instance
+- **THEN** the transaction summary MUST display `locked_by` and `locked_until` when those fields are present
 
 ### Requirement: Observer SHALL provide an auto-refresh watch mode
 The system SHALL provide a terminal watch mode for a single transaction.

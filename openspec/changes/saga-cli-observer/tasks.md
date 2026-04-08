@@ -7,7 +7,7 @@
 ## 2. Read model and query layer
 
 - [ ] 2.1 Add a dedicated read-only query package for loading transaction summaries, transaction detail, ordered steps, and poll task state from existing `saga_*` tables
-- [ ] 2.2 Define observer-facing view models that include status, timing, retry, polling, trace, and error summary fields
+- [ ] 2.2 Define observer-facing view models that include status, timing, retry, polling, trace, lock, and error summary fields, and decide where `_trace_id` / `_span_id` are extracted from `payload`
 - [ ] 2.3 Implement list and failed queries with status filtering, sorting, and bounded result limits suitable for operator use
 - [ ] 2.4 Implement single-transaction detail queries that join transaction, steps, and poll task data without taking execution locks
 

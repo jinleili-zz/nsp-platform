@@ -50,8 +50,11 @@
 **替代方案**：只调用 `Engine.Query()`
 
 **理由**：
-- `Engine.Query()` 当前只返回事务状态、当前步骤、步骤状态、轮询次数和最后错误，信息粒度不足以支撑 TUI 详情页
-- 直查数据库可以拿到 `retry_count`、`started_at`、`finished_at`、`next_poll_at`、`locked_by`、`locked_until`、`action_response` 等完整观测字段
+- `Engine.Query()` 当前返回的字段为：
+  - 事务级：`ID`、`Status`、`CurrentStep`、`LastError`、`CreatedAt`、`FinishedAt`
+  - 步骤级：`Steps[Index, Name, Status, PollCount, LastError]`
+- 这些字段足够支持轻量状态查询，但仍不足以支撑 observer 的详情和排障视图
+- 直查数据库还可以拿到 `retry_count`、`started_at`、`finished_at`、`next_poll_at`、`locked_by`、`locked_until`、`action_response`，以及从 `payload` 中兼容提取 `_trace_id` 等额外观测字段
 - 第一阶段无需改动现有 `Engine` API，避免把排障视图耦合进业务 SDK
 
 ### Decision 3: 将查询逻辑收敛到单独的只读仓储层
@@ -137,4 +140,4 @@
 
 - 第一阶段的命令入口名称最终使用 `sagactl` 还是其他仓库约定名称
 - TUI 依赖最终选型是 `tview`、`bubbletea`，还是用 ANSI 刷新做一个轻量 watch 模式
-- 是否需要在第一阶段额外暴露 `trace_id`、`locked_by`、`locked_until` 到普通 CLI 列表视图
+- 是否需要在第一阶段额外暴露 `trace_id` 到普通 CLI 列表视图，还是仅在 `show/watch` 详情视图展示
