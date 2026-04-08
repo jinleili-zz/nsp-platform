@@ -147,6 +147,51 @@ psql -h localhost -U saga -d saga_test -f migrations/saga.sql
 
 ## 使用指南
 
+### SAGA 观测工具（第一期）
+
+仓库提供一个只读的终端观测命令 `sagactl`，用于直接读取 PostgreSQL 中的
+`saga_transactions`、`saga_steps`、`saga_poll_tasks` 表，快速查看事务和步骤执行状态。
+
+基础用法：
+
+```bash
+sagactl [--dsn <dsn>] <list|failed|show|watch> [flags]
+```
+
+第一期范围：
+- `list [--status <status>] [--limit N]`：按状态筛选事务，默认返回最近 100 条
+- `failed [--limit N]`：查看最近失败事务，按 `finished_at` 倒序回退 `updated_at`
+- `show <tx-id>`：查看单个事务详情和按顺序排列的步骤信息
+- `watch <tx-id> [--interval 3s]`：终端自动刷新观察模式，适合跟踪轮询和补偿过程
+
+状态过滤：
+- `list --status` 支持 `pending`、`running`、`compensating`、`succeeded`、`failed`
+
+帮助行为：
+- `sagactl list -h`、`sagactl show -h` 等帮助命令不依赖数据库连接
+- 未知子命令和参数错误会先返回本地帮助或错误，再决定是否连接数据库
+
+第一期限制：
+- 只读查询，不会修改事务状态
+- 不提供重试、补偿、终止等运维动作
+- 展示的是当前快照，不是完整事件时间线
+- `show` / `watch` 读取事务摘要和步骤详情时使用同一个只读数据库快照，避免混合不同时间点的数据
+
+示例：
+
+```bash
+SAGA_OBSERVER_DSN="postgres://user:pass@localhost:5432/nsp?sslmode=disable" \
+go run ./cmd/sagactl list --status running
+
+SAGA_OBSERVER_DSN="postgres://user:pass@localhost:5432/nsp?sslmode=disable" \
+go run ./cmd/sagactl show <tx-id>
+
+SAGA_OBSERVER_DSN="postgres://user:pass@localhost:5432/nsp?sslmode=disable" \
+go run ./cmd/sagactl watch <tx-id>
+
+go run ./cmd/sagactl watch -h
+```
+
 ### 1. 初始化引擎
 
 ```go

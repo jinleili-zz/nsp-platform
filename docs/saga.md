@@ -128,6 +128,55 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 
 ## 快速使用
 
+### 观测工具（第一期）
+
+除了 SDK 查询接口外，仓库还提供了一个只读终端观测命令 `sagactl`，用于直接查看
+SAGA 持久化状态，避免排障时手写 SQL。
+
+基础用法：
+
+```bash
+sagactl [--dsn <dsn>] <list|failed|show|watch> [flags]
+```
+
+连接方式：
+- 通过 `--dsn` 传入只读 PostgreSQL DSN
+- 或设置环境变量 `SAGA_OBSERVER_DSN`
+
+子命令：
+- `list [--status <status>] [--limit N]`
+  用途：查看事务列表，按创建时间倒序返回
+  `--status` 可选值：`pending`、`running`、`compensating`、`succeeded`、`failed`
+  `--limit` 默认值：`100`
+- `failed [--limit N]`
+  用途：查看最近失败事务，按 `COALESCE(finished_at, updated_at)` 倒序返回
+  `--limit` 默认值：`100`
+- `show <tx-id>`
+  用途：查看单个事务详情，包括事务摘要、步骤状态和关联 poll task
+- `watch <tx-id> [--interval 3s]`
+  用途：循环刷新 `show` 视图，适合观察轮询和补偿阶段
+  `--interval` 默认值：`3s`
+
+帮助和错误处理：
+- `sagactl list -h`、`sagactl watch -h` 等帮助命令不依赖数据库连接
+- 未知子命令或参数错误时，会优先返回本地帮助或参数错误，而不是先尝试连接数据库
+
+第一期边界：
+- 只读，不会修改 `saga_*` 表
+- 默认结果上限为 100
+- `watch` 展示的是当前持久化快照自动刷新，不是完整事件历史
+- `show` / `watch` 中的事务摘要和步骤详情来自同一个只读 SQL 快照，不会混合不同时间点的数据
+
+示例：
+
+```bash
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" list --status compensating
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" failed
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" show <tx-id>
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" watch --interval 1s <tx-id>
+go run ./cmd/sagactl show -h
+```
+
 ### 引擎初始化
 
 ```go
