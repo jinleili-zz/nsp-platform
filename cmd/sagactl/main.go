@@ -29,9 +29,10 @@ type observerService interface {
 }
 
 type app struct {
-	out  io.Writer
-	err  io.Writer
-	open func(context.Context, string) (observerService, io.Closer, error)
+	out        io.Writer
+	err        io.Writer
+	open       func(context.Context, string) (observerService, io.Closer, error)
+	newContext func() (context.Context, context.CancelFunc)
 }
 
 func main() {
@@ -46,7 +47,14 @@ func newApp(out, err io.Writer, opener func(context.Context, string) (observerSe
 	if opener == nil {
 		opener = openObserverService
 	}
-	return &app{out: out, err: err, open: opener}
+	return &app{
+		out:  out,
+		err:  err,
+		open: opener,
+		newContext: func() (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		},
+	}
 }
 
 func (a *app) run(args []string) error {
@@ -72,7 +80,7 @@ func (a *app) run(args []string) error {
 		return errors.New("dsn is required via --dsn or SAGA_OBSERVER_DSN")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := a.newContext()
 	defer cancel()
 
 	svc, closer, err := a.open(ctx, effectiveDSN)
@@ -333,13 +341,19 @@ func fallback(value, alt string) string {
 
 func truncateText(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if value == "" || limit <= 0 || len(value) <= limit {
+	if value == "" || limit <= 0 {
 		return value
 	}
-	if limit <= 3 {
-		return value[:limit]
+
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
 	}
-	return value[:limit-3] + "..."
+
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
 }
 
 func summarizeJSON(raw []byte, limit int) string {

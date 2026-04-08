@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jinleili-zz/nsp-platform/saga/observer"
 )
@@ -126,6 +127,9 @@ func TestAppRunShow(t *testing.T) {
 	if err := app.run([]string{"--dsn", "dsn", "show", "tx-1"}); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
+	if svc.lastDetailTxID != "tx-1" {
+		t.Fatalf("expected detail tx id tx-1, got %q", svc.lastDetailTxID)
+	}
 
 	output := out.String()
 	if !strings.Contains(output, "trace_id: unavailable") {
@@ -139,12 +143,59 @@ func TestAppRunShow(t *testing.T) {
 	}
 }
 
+func TestAppRunWatch(t *testing.T) {
+	var out strings.Builder
+	svc := &fakeObserverService{
+		detailResult: &observer.TransactionDetail{
+			Summary: observer.TransactionSummary{
+				ID:          "tx-watch",
+				Status:      "running",
+				CurrentStep: 1,
+				CreatedAt:   time.Date(2026, 4, 8, 12, 0, 0, 0, time.UTC),
+				UpdatedAt:   time.Date(2026, 4, 8, 12, 1, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	app := newApp(&out, io.Discard, func(context.Context, string) (observerService, io.Closer, error) {
+		return svc, nopCloser{}, nil
+	})
+	app.newContext = func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+
+	if err := app.run([]string{"--dsn", "dsn", "watch", "--interval", "1ms", "tx-watch"}); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if svc.lastDetailTxID != "tx-watch" {
+		t.Fatalf("expected detail tx id tx-watch, got %q", svc.lastDetailTxID)
+	}
+	output := out.String()
+	if !strings.Contains(output, "watching transaction tx-watch") {
+		t.Fatalf("expected watch heading in output: %s", output)
+	}
+}
+
+func TestTruncateTextUTF8(t *testing.T) {
+	got := truncateText("步骤执行失败：连接超时", 8)
+	want := "步骤执行失..."
+	if got != want {
+		t.Fatalf("truncateText() = %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateText() returned invalid utf8: %q", got)
+	}
+}
+
 type fakeObserverService struct {
 	listResult      *observer.ListResult
 	failedResult    *observer.ListResult
 	detailResult    *observer.TransactionDetail
 	lastListFilter  observer.ListFilter
 	lastFailedLimit int
+	lastDetailTxID  string
 }
 
 func (f *fakeObserverService) ListTransactions(_ context.Context, filter observer.ListFilter) (*observer.ListResult, error) {
@@ -157,7 +208,8 @@ func (f *fakeObserverService) ListFailedTransactions(_ context.Context, limit in
 	return f.failedResult, nil
 }
 
-func (f *fakeObserverService) GetTransactionDetail(_ context.Context, _ string) (*observer.TransactionDetail, error) {
+func (f *fakeObserverService) GetTransactionDetail(_ context.Context, txID string) (*observer.TransactionDetail, error) {
+	f.lastDetailTxID = txID
 	return f.detailResult, nil
 }
 

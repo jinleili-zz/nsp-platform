@@ -179,7 +179,7 @@ go run ./cmd/sagactl watch <tx-id>
 ### 1. 初始化引擎
 
 ```go
-import "github.com/paic/nsp-common/pkg/saga"
+import "github.com/jinleili-zz/nsp-platform/saga"
 
 // 创建引擎
 engine, err := saga.NewEngine(&saga.Config{

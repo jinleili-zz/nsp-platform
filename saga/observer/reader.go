@@ -13,6 +13,7 @@ import (
 
 // DefaultLimit is the default maximum number of rows returned by list commands.
 const DefaultLimit = 100
+const maxLimit = 10000
 
 // ListFilter controls transaction list queries.
 type ListFilter struct {
@@ -250,6 +251,9 @@ func (r *Reader) GetTransactionDetail(ctx context.Context, txID string) (*Transa
 func normalizeLimit(limit int) int {
 	if limit <= 0 {
 		return DefaultLimit
+	}
+	if limit > maxLimit {
+		return maxLimit
 	}
 	return limit
 }

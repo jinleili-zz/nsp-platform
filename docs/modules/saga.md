@@ -1,6 +1,6 @@
 # Saga 模块
 
-> 包路径：`github.com/paic/nsp-common/pkg/saga`
+> 包路径：`github.com/jinleili-zz/nsp-platform/saga`
 
 ## 功能说明
 
@@ -161,7 +161,7 @@ import (
     "time"
 
     _ "github.com/lib/pq"
-    "github.com/paic/nsp-common/pkg/saga"
+    "github.com/jinleili-zz/nsp-platform/saga"
 )
 
 func main() {

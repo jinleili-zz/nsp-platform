@@ -194,6 +194,8 @@ examples/
 - `template.go`：模板渲染
 - `jsonpath.go`：简单 JSONPath 提取
 - `migrations/saga.sql`：建表与增量字段迁移脚本
+- `observer/reader.go`：只读观测查询层，供 CLI/TUI 或后续观测面复用
+- `cmd/sagactl/main.go`：SAGA 只读终端观测命令
 
 ### 当前对外能力
 
@@ -221,6 +223,15 @@ examples/
 - `Store`
 - `PostgresStore`
 - `NewPostgresStore`
+- `observer.DefaultLimit`
+- `observer.ListFilter`
+- `observer.ListResult`
+- `observer.TransactionSummary`
+- `observer.TransactionDetail`
+- `observer.StepDetail`
+- `observer.PollTaskDetail`
+- `observer.Reader`
+- `observer.NewReader`
 - `RenderTemplate`
 - `ExtractByPath`
 
@@ -245,6 +256,10 @@ examples/
   - `saga_poll_tasks.locked_by`
   - `saga_poll_tasks.locked_until`
 - 数据库脚本位于 `saga/migrations/saga.sql`
+- `observer.Reader` 只执行只读查询，不会获取执行锁，也不会写入任何 `saga_*` 表
+- `cmd/sagactl` 当前提供 `list`、`failed`、`show`、`watch` 四个子命令
+- `cmd/sagactl` 支持通过 `--dsn` 或环境变量 `SAGA_OBSERVER_DSN` 指定只读 PostgreSQL 连接串
+- `cmd/sagactl watch` 当前采用 ANSI 清屏自动刷新，而不是完整 TUI 框架
 
 ### 当前数据库要点
 
