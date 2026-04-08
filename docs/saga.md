@@ -126,6 +126,34 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 
 ## 快速使用
 
+### 观测工具（第一期）
+
+除了 SDK 查询接口外，仓库还提供了一个只读终端观测命令 `sagactl`，用于直接查看
+SAGA 持久化状态，避免排障时手写 SQL。
+
+命令特性：
+- `list [--status <status>] [--limit N]`
+- `failed [--limit N]`
+- `show <tx-id>`
+- `watch <tx-id> [--interval 3s]`
+
+连接方式：
+- 通过 `--dsn` 传入只读 PostgreSQL DSN
+- 或设置环境变量 `SAGA_OBSERVER_DSN`
+
+第一期边界：
+- 只读，不会修改 `saga_*` 表
+- 默认结果上限为 100
+- `watch` 展示的是当前快照自动刷新，不是完整事件历史
+
+示例：
+
+```bash
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" list --status compensating
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" failed
+go run ./cmd/sagactl --dsn "postgres://user:pass@localhost:5432/nsp?sslmode=disable" show <tx-id>
+```
+
 ### 引擎初始化
 
 ```go

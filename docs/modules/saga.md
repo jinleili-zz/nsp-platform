@@ -126,6 +126,30 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 
 ## 快速使用
 
+### 观测工具（第一期）
+
+模块附带一个只读终端观测命令 `sagactl`，适合开发和运维直接连接 PostgreSQL 查看
+SAGA 事务执行情况。
+
+支持的命令：
+- `list`：按状态查看事务列表
+- `failed`：查看最近失败事务
+- `show <tx-id>`：查看单事务详情
+- `watch <tx-id>`：自动刷新观察事务快照
+
+使用方式：
+
+```bash
+SAGA_OBSERVER_DSN="postgres://user:pass@localhost:5432/nsp?sslmode=disable" \
+go run ./cmd/sagactl list --status pending
+```
+
+第一期限制：
+- 只读，不会申请执行锁或修改任何状态
+- 默认最多返回 100 条记录
+- 不提供重试、人工补偿或终止事务能力
+- 不展示完整事件时间线，仅展示当前持久化快照
+
 ### 引擎初始化
 
 ```go
