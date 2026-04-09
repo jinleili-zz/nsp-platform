@@ -29,10 +29,15 @@
 - 当日志与某个事务相关时，SHALL 包含 `tx_id`
 - 当日志与某个步骤相关时，SHALL 包含 `step_id`，并在可用时包含 `step_name`
 - 当调用路径持有带 trace 的 `context.Context` 时，SHALL 通过 context-aware logger 自动带出 `trace_id` 和 `span_id`
+- 当 `Coordinator`、`Poller` 等长生命周期后台路径处理某个事务或步骤时，若当前运行 `context` 不包含事务级 trace 信息，实现 SHALL 从持久化 payload 中的 `_trace_id` / `_span_id` 重建事务级 context，再用于运行日志输出
 
 #### Scenario: Step execution log carries trace fields
 - **WHEN** 某个带 trace 上下文的事务步骤在执行或补偿过程中产生运行日志
 - **THEN** 日志 SHALL 同时包含 saga 相关字段（如 `tx_id`、`step_id`）以及从 `context.Context` 提取的 `trace_id` / `span_id`
+
+#### Scenario: Coordinator rehydrates transaction trace context before logging
+- **WHEN** `Coordinator` 或 `Poller` 在后台协程中处理某个事务，当前运行 `context` 不带该事务的 trace 信息，但事务 payload 中存在 `_trace_id` / `_span_id`
+- **THEN** 实现 SHALL 在输出事务相关运行日志前重建事务级 trace context，使日志自动包含对应的 `trace_id` / `span_id`
 
 #### Scenario: Background saga log without trace still carries identifiers
 - **WHEN** 后台恢复扫描或超时扫描在没有业务 trace 的上下文中输出日志

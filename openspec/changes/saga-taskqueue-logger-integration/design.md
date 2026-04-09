@@ -61,15 +61,19 @@
 
 **选择**：
 - 为 `saga.Config` 新增可选 logger 配置
-- 为 `taskqueue/asynqbroker.ConsumerConfig` 新增面向仓库 `logger` 的可选配置
+- 为 `taskqueue/asynqbroker` 的 `Consumer`、`Broker`、`Inspector` 具体实现提供面向仓库 `logger` 的可选配置入口
+- 保留现有 `NewBroker(opt)` / `NewInspector(opt)` 作为默认构造入口，并通过新增的配置化构造入口承载显式 logger 注入
 - 保持 `taskqueue.Broker` / `taskqueue.Consumer` 核心接口不变
 
 **替代方案**：
 - 完全依赖全局 logger，不提供注入能力
+- 只给 `ConsumerConfig` 增加仓库 logger 配置，忽略 `Broker` / `Inspector`
 - 修改 `Broker` / `Consumer` 接口，把 logger 作为构造或运行参数强制引入
 
 **理由**：
 - 全局 logger 可以作为默认值，但缺乏测试隔离和模块级覆写能力
+- 如果只有 `Consumer` 支持仓库 logger 注入，而 `Broker` / `Inspector` 只能硬编码默认 logger，`asynqbroker` 的设计会变得不一致
+- 保留现有默认构造入口，同时补充配置化构造入口，可以兼顾向后兼容和实现层一致性
 - 直接改核心接口会把一次日志改造升级为更大范围的 API 变更，不必要
 - 在配置层做可选字段是向后兼容的，适合当前仓库节奏
 
@@ -85,13 +89,14 @@
 - 这两个模块已经在运行路径中持有 `context.Context`
 - trace 与日志关联是这次改造的核心收益之一，不该退化成手工字段复制
 - 统一使用 context-aware 接口更利于减少漏字段和后续审计
+- 但 `saga` 的协调与轮询主循环运行在长生命周期后台协程中，事务级 trace 需要先从 payload 中重建到 context，单纯替换为 `logger.*Context(...)` 并不足以保证日志带出正确 trace
 
 ### Decision 5: asynq 框架日志默认桥接到仓库 `logger`，但保留显式 `asynq.Logger` 覆盖
 
 **选择**：
 - 保留 `ConsumerConfig.Logger asynq.Logger` 的现有覆盖语义
 - 当调用方未显式提供 `asynq.Logger` 时，由实现层提供一个桥接到仓库 `logger` 的默认 adapter
-- consumer 包装层自己的错误日志也走仓库 `logger`
+- `Consumer`、`Broker`、`Inspector` 自身的运行日志统一走仓库 `logger`
 
 **替代方案**：
 - 强制删除 `ConsumerConfig.Logger`，统一改为仓库 `logger`
@@ -102,21 +107,23 @@
 - 只改包装层日志而不处理 asynq 内部日志，会继续留下两套输出通道
 - 默认桥接 + 显式覆盖，是兼容性和一致性的平衡点
 
-### Decision 6: 先覆盖“明确属于运行时基础设施”的日志点，不扩大到所有工具路径
+### Decision 6: 第一阶段同时清理运行时代码、文档和相关 examples
 
 **选择**：本次重点覆盖：
 - SAGA 后台协程与状态机驱动日志
 - poll/recovery/timeout/compensation/queue 压力等运行事件
 - taskqueue consumer/broker 包装层和 asynq 运行时日志
+- 与本次 logger 行为直接相关的正式文档和 `examples/` 接入示例
 
 **替代方案**：
+- 只改库本身运行时路径，把 `examples/` 和文档留到后续阶段
 - 一次性扫全仓所有 `fmt.Printf` / `log.Printf`
-- 只改最明显的几处错误日志
 
 **理由**：
 - 这次提案的边界是 `saga` 和 `taskqueue` 运行时日志统一
-- 一次性全仓收口会让范围失控，影响交付节奏
-- 只改零散错误日志又无法形成稳定规则，后续还会反复回退
+- 如果第一阶段只改库代码，不同步更新 `examples/` 和文档，对外会同时存在两套接入口径
+- 相关示例和文档与本次变更直接耦合，放到后续阶段会增加误导和返工成本
+- 但范围仍然限定在与 `saga` / `taskqueue` logger 接入直接相关的内容，不扩展到全仓任意示例或任意日志点
 
 ## Risks / Trade-offs
 
@@ -127,20 +134,15 @@
   → 对无 trace 的后台日志至少补齐 `tx_id`、`step_id`、`queue`、`task_id` 等模块级标识，不把 trace 作为唯一关联手段
 
 - **[风险] 同时支持仓库 `logger` 和 `asynq.Logger` 会让配置面略复杂**
-  → 保持现有 `asynq.Logger` 字段不变，只新增一个面向仓库 logger 的可选字段，并明确优先级规则
+  → 保持现有 `asynq.Logger` 字段不变，只新增面向仓库 logger 的可选配置入口，并明确优先级规则；`Broker` / `Inspector` 只暴露仓库 logger 配置，不再引入第三方 logger 变体
 
 - **[取舍] 通过配置层注入 logger 仍然会让模块直接依赖仓库 logger 类型**
   → 当前仓库已经把 `logger` 作为基础设施模块，这是可接受的耦合，收益大于抽象成本
 
 ## Migration Plan
 
-1. 为 `saga` 和 `taskqueue/asynqbroker` 明确 logger 配置入口与默认值策略
+1. 为 `saga` 和 `taskqueue/asynqbroker` 明确 logger 配置入口与默认值策略，包括 `Consumer`、`Broker`、`Inspector` 的默认入口与配置化入口
 2. 替换运行时路径中的标准库日志调用，统一为仓库 `logger`
 3. 为 asynq 提供默认 logger adapter，并验证显式 `asynq.Logger` 覆盖仍然生效
 4. 补充测试，验证 logger 注入、trace 关联和关键错误路径日志行为
-5. 更新模块文档和接入说明，说明新的 logger 配置和默认行为
-
-## Open Questions
-
-- `taskqueue/asynqbroker` 是否只给 `ConsumerConfig` 增加仓库 logger 配置，还是连 `Broker` / `Inspector` 的具体实现也补同样的入口
-- 是否需要在第一阶段同步清理 `examples/` 或文档中的标准库日志示例，还是只覆盖库本身运行时路径
+5. 更新模块文档、README 与相关 `examples/`，说明新的 logger 配置和默认行为
