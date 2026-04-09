@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jinleili-zz/nsp-platform/auth"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
@@ -37,6 +38,8 @@ type Config struct {
 	InstanceID string
 	// CredentialStore resolves AK credentials for optional outbound request signing.
 	CredentialStore auth.CredentialStore
+	// Logger is the optional module runtime logger. Defaults to logger.Platform().
+	Logger logger.Logger
 }
 
 // DefaultConfig returns the default engine configuration.
@@ -92,6 +95,7 @@ type Engine struct {
 	coordinator *Coordinator
 	config      *Config
 	cancelFunc  context.CancelFunc
+	log         logger.Logger
 }
 
 // NewEngine creates a new SAGA engine with the given configuration.
@@ -153,6 +157,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 	executorCfg := &ExecutorConfig{
 		HTTPTimeout: cfg.HTTPTimeout,
 		HTTPClient:  cfg.HTTPClient,
+		Logger:      cfg.Logger,
 	}
 	executor := NewExecutor(store, executorCfg, cfg.CredentialStore)
 
@@ -160,6 +165,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 		ScanInterval: cfg.PollScanInterval,
 		BatchSize:    cfg.PollBatchSize,
 		InstanceID:   cfg.InstanceID,
+		Logger:       cfg.Logger,
 	}
 	poller := NewPoller(store, executor, pollerCfg)
 
@@ -170,6 +176,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 		AsyncStepTimeout:    10 * time.Minute,
 		InstanceID:          cfg.InstanceID,
 		LeaseDuration:       5 * time.Minute,
+		Logger:              cfg.Logger,
 	}
 	coordinator := NewCoordinator(store, executor, poller, coordCfg)
 
@@ -180,6 +187,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 		poller:      poller,
 		coordinator: coordinator,
 		config:      cfg,
+		log:         resolveSagaLogger(cfg.Logger),
 	}, nil
 }
 

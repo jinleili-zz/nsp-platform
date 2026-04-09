@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 )
 
@@ -23,14 +24,21 @@ var (
 // 内部持有 *asynq.Inspector，实现所有 4 层接口。
 type Inspector struct {
 	inner  *asynq.Inspector
+	log    logger.Logger
 	mu     sync.Mutex
 	closed bool
 }
 
 // NewInspector 创建 asynq 实现的 Inspector。
 func NewInspector(opt asynq.RedisConnOpt) *Inspector {
+	return NewInspectorWithConfig(opt, InspectorConfig{})
+}
+
+// NewInspectorWithConfig 创建带可选运行时 logger 配置的 asynq Inspector。
+func NewInspectorWithConfig(opt asynq.RedisConnOpt, cfg InspectorConfig) *Inspector {
 	return &Inspector{
 		inner: asynq.NewInspector(opt),
+		log:   resolveRuntimeLogger(cfg.Logger),
 	}
 }
 
@@ -40,13 +48,22 @@ func NewInspector(opt asynq.RedisConnOpt) *Inspector {
 
 // Queues 返回所有队列名称列表。
 func (i *Inspector) Queues(ctx context.Context) ([]string, error) {
-	return i.inner.Queues()
+	queues, err := i.inner.Queues()
+	if err != nil {
+		i.log.ErrorContext(ctx, "failed to list queues", logger.FieldError, err)
+		return nil, err
+	}
+	return queues, nil
 }
 
 // GetQueueStats 返回指定队列的实时统计快照。
 func (i *Inspector) GetQueueStats(ctx context.Context, queue string) (*taskqueue.QueueStats, error) {
 	info, err := i.inner.GetQueueInfo(queue)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to get queue stats",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		if isQueueNotFoundErr(err) {
 			return nil, taskqueue.ErrQueueNotFound
 		}
@@ -70,6 +87,7 @@ func (i *Inspector) GetQueueStats(ctx context.Context, queue string) (*taskqueue
 func (i *Inspector) ListWorkers(ctx context.Context) ([]*taskqueue.WorkerInfo, error) {
 	servers, err := i.inner.Servers()
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to list worker servers", logger.FieldError, err)
 		return nil, err
 	}
 
@@ -113,6 +131,11 @@ func (i *Inspector) Close() error {
 func (i *Inspector) GetTaskInfo(ctx context.Context, queue, taskID string) (*taskqueue.TaskDetail, error) {
 	info, err := i.inner.GetTaskInfo(queue, taskID)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to get task info",
+			logger.FieldQueue, queue,
+			logger.FieldTaskID, taskID,
+			logger.FieldError, err,
+		)
 		if isTaskNotFoundErr(err) {
 			return nil, taskqueue.ErrTaskNotFound
 		}
@@ -146,6 +169,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 		// pending + aggregating
 		pendingTasks, err := i.inner.ListPendingTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list pending tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 
@@ -174,6 +201,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 	case taskqueue.TaskStateScheduled:
 		scheduledTasks, err := i.inner.ListScheduledTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list scheduled tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 		tasks = make([]*taskqueue.TaskDetail, 0, len(scheduledTasks))
@@ -188,6 +219,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 	case taskqueue.TaskStateActive:
 		activeTasks, err := i.inner.ListActiveTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list active tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 		tasks = make([]*taskqueue.TaskDetail, 0, len(activeTasks))
@@ -202,6 +237,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 	case taskqueue.TaskStateRetry:
 		retryTasks, err := i.inner.ListRetryTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list retry tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 		tasks = make([]*taskqueue.TaskDetail, 0, len(retryTasks))
@@ -216,6 +255,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 	case taskqueue.TaskStateFailed:
 		archivedTasks, err := i.inner.ListArchivedTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list archived tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 		tasks = make([]*taskqueue.TaskDetail, 0, len(archivedTasks))
@@ -230,6 +273,10 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 	case taskqueue.TaskStateCompleted:
 		completedTasks, err := i.inner.ListCompletedTasks(queue, asynqOpts...)
 		if err != nil {
+			i.log.ErrorContext(ctx, "failed to list completed tasks",
+				logger.FieldQueue, queue,
+				logger.FieldError, err,
+			)
 			return nil, wrapQueueErr(err)
 		}
 		tasks = make([]*taskqueue.TaskDetail, 0, len(completedTasks))
@@ -259,6 +306,11 @@ func (i *Inspector) ListTasks(ctx context.Context, queue string, state taskqueue
 func (i *Inspector) DeleteTask(ctx context.Context, queue, taskID string) error {
 	err := i.inner.DeleteTask(queue, taskID)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to delete task",
+			logger.FieldQueue, queue,
+			logger.FieldTaskID, taskID,
+			logger.FieldError, err,
+		)
 		if isTaskNotFoundErr(err) {
 			return taskqueue.ErrTaskNotFound
 		}
@@ -273,6 +325,11 @@ func (i *Inspector) DeleteTask(ctx context.Context, queue, taskID string) error 
 func (i *Inspector) RunTask(ctx context.Context, queue, taskID string) error {
 	err := i.inner.RunTask(queue, taskID)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to run task immediately",
+			logger.FieldQueue, queue,
+			logger.FieldTaskID, taskID,
+			logger.FieldError, err,
+		)
 		if isTaskNotFoundErr(err) {
 			return taskqueue.ErrTaskNotFound
 		}
@@ -287,6 +344,11 @@ func (i *Inspector) RunTask(ctx context.Context, queue, taskID string) error {
 func (i *Inspector) ArchiveTask(ctx context.Context, queue, taskID string) error {
 	err := i.inner.ArchiveTask(queue, taskID)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to archive task",
+			logger.FieldQueue, queue,
+			logger.FieldTaskID, taskID,
+			logger.FieldError, err,
+		)
 		if isTaskNotFoundErr(err) {
 			return taskqueue.ErrTaskNotFound
 		}
@@ -299,7 +361,14 @@ func (i *Inspector) ArchiveTask(ctx context.Context, queue, taskID string) error
 
 // CancelTask 向正在执行的任务发送取消信号。
 func (i *Inspector) CancelTask(ctx context.Context, taskID string) error {
-	return i.inner.CancelProcessing(taskID)
+	err := i.inner.CancelProcessing(taskID)
+	if err != nil {
+		i.log.ErrorContext(ctx, "failed to cancel active task",
+			logger.FieldTaskID, taskID,
+			logger.FieldError, err,
+		)
+	}
+	return err
 }
 
 // BatchDeleteTasks 批量删除指定状态的所有任务。
@@ -333,6 +402,10 @@ func (i *Inspector) BatchDeleteTasks(ctx context.Context, queue string, state ta
 	}
 
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to batch delete tasks",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return 0, wrapQueueErr(err)
 	}
 	return deleted, nil
@@ -355,6 +428,10 @@ func (i *Inspector) BatchRunTasks(ctx context.Context, queue string, state taskq
 	}
 
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to batch run tasks",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return 0, wrapQueueErr(err)
 	}
 	return count, nil
@@ -377,6 +454,10 @@ func (i *Inspector) BatchArchiveTasks(ctx context.Context, queue string, state t
 	}
 
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to batch archive tasks",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return 0, wrapQueueErr(err)
 	}
 	return count, nil
@@ -390,6 +471,10 @@ func (i *Inspector) BatchArchiveTasks(ctx context.Context, queue string, state t
 func (i *Inspector) PauseQueue(ctx context.Context, queue string) error {
 	err := i.inner.PauseQueue(queue)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to pause queue",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return wrapQueueErr(err)
 	}
 	return nil
@@ -399,6 +484,10 @@ func (i *Inspector) PauseQueue(ctx context.Context, queue string) error {
 func (i *Inspector) UnpauseQueue(ctx context.Context, queue string) error {
 	err := i.inner.UnpauseQueue(queue)
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to unpause queue",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return wrapQueueErr(err)
 	}
 	return nil
@@ -413,6 +502,10 @@ func (i *Inspector) DeleteQueue(ctx context.Context, queue string, force bool) e
 		err = i.inner.DeleteQueue(queue, false)
 	}
 	if err != nil {
+		i.log.ErrorContext(ctx, "failed to delete queue",
+			logger.FieldQueue, queue,
+			logger.FieldError, err,
+		)
 		return wrapQueueErr(err)
 	}
 	return nil

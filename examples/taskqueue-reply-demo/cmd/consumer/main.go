@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,16 +11,23 @@ import (
 	"github.com/hibiken/asynq"
 
 	replydemo "github.com/jinleili-zz/nsp-platform/examples/taskqueue-reply-demo"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
 )
 
 func main() {
+	if err := logger.Init(logger.DevelopmentConfig("taskqueue-reply-consumer")); err != nil {
+		panic(err)
+	}
+	defer logger.Sync()
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
 	opt := asynq.RedisClientOpt{Addr: redisAddr}
+	runtimeLog := logger.Platform().With("example", "taskqueue-reply-consumer")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -31,14 +37,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("Received shutdown signal")
+		runtimeLog.Info("received shutdown signal")
 		cancel()
 	}()
 
 	// ---------------------------------------------------------------
 	// 1. Initialize Broker for sending replies
 	// ---------------------------------------------------------------
-	broker := asynqbroker.NewBroker(opt)
+	broker := asynqbroker.NewBrokerWithConfig(opt, asynqbroker.BrokerConfig{Logger: runtimeLog})
 	defer broker.Close()
 
 	// ---------------------------------------------------------------
@@ -49,6 +55,7 @@ func main() {
 		Queues: map[string]int{
 			replydemo.CalcRequestQueue: 1,
 		},
+		RuntimeLogger: runtimeLog,
 	})
 
 	// ---------------------------------------------------------------
@@ -58,12 +65,15 @@ func main() {
 	consumer.Handle(replydemo.TaskTypeCalc, func(ctx context.Context, t *taskqueue.Task) error {
 		var calcTask replydemo.CalcTask
 		if err := json.Unmarshal(t.Payload, &calcTask); err != nil {
-			log.Printf("[Consumer] Failed to parse task payload: %v", err)
+			logger.ErrorContext(ctx, "failed to parse task payload", logger.FieldError, err)
 			return err
 		}
 
-		log.Printf("[Process] task_id=%s op=%s operands=%v",
-			calcTask.TaskID[:8], calcTask.Operation, calcTask.Operands)
+		logger.InfoContext(ctx, "processing calculation task",
+			logger.FieldTaskID, calcTask.TaskID,
+			"operation", calcTask.Operation,
+			"operands", calcTask.Operands,
+		)
 
 		// Execute calculation.
 		result := calculate(&calcTask)
@@ -72,7 +82,7 @@ func main() {
 		if t.Reply != nil && t.Reply.Queue != "" {
 			replyPayload, err := json.Marshal(result)
 			if err != nil {
-				log.Printf("[Consumer] Failed to marshal reply: %v", err)
+				logger.ErrorContext(ctx, "failed to marshal reply payload", logger.FieldError, err)
 				return err
 			}
 
@@ -83,12 +93,15 @@ func main() {
 			}
 
 			if _, err := broker.Publish(ctx, replyTask); err != nil {
-				log.Printf("[Consumer] Failed to send reply: %v", err)
+				logger.ErrorContext(ctx, "failed to send reply task", logger.FieldError, err)
 				return err
 			}
 
-			log.Printf("[Reply] task_id=%s result=%.2f -> %s",
-				result.TaskID[:8], result.Result, t.Reply.Queue)
+			logger.InfoContext(ctx, "sent reply task",
+				logger.FieldTaskID, result.TaskID,
+				"result", result.Result,
+				logger.FieldQueue, t.Reply.Queue,
+			)
 		}
 
 		return nil
@@ -97,9 +110,9 @@ func main() {
 	// ---------------------------------------------------------------
 	// 4. Start consuming (blocking)
 	// ---------------------------------------------------------------
-	log.Printf("Consumer started, listening on queue: %s", replydemo.CalcRequestQueue)
+	runtimeLog.Info("consumer started", logger.FieldQueue, replydemo.CalcRequestQueue)
 	if err := consumer.Start(ctx); err != nil {
-		log.Fatalf("Consumer error: %v", err)
+		runtimeLog.Fatal("consumer stopped with error", logger.FieldError, err)
 	}
 }
 

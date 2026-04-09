@@ -2,10 +2,10 @@ package asynqbroker
 
 import (
 	"context"
-	"log"
 	"sync"
 
 	"github.com/hibiken/asynq"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 )
 
@@ -19,6 +19,8 @@ type ConsumerConfig struct {
 	StrictPriority bool
 	// Logger is the asynq logger. If nil, asynq's default logger is used.
 	Logger asynq.Logger
+	// RuntimeLogger is the optional repository logger for wrapper runtime logs.
+	RuntimeLogger logger.Logger
 }
 
 // Consumer implements taskqueue.Consumer using asynq.
@@ -27,6 +29,7 @@ type Consumer struct {
 	mux      *asynq.ServeMux
 	stopCh   chan struct{}
 	stopOnce sync.Once
+	log      logger.Logger
 }
 
 // NewConsumer creates an asynq-backed Consumer.
@@ -40,9 +43,8 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 		Queues:         cfg.Queues,
 		StrictPriority: cfg.StrictPriority,
 	}
-	if cfg.Logger != nil {
-		asynqCfg.Logger = cfg.Logger
-	}
+	runtimeLog := resolveRuntimeLogger(cfg.RuntimeLogger)
+	asynqCfg.Logger = resolveFrameworkLogger(runtimeLog, cfg.Logger)
 
 	server := asynq.NewServer(opt, asynqCfg)
 
@@ -50,6 +52,7 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 		server: server,
 		mux:    asynq.NewServeMux(),
 		stopCh: make(chan struct{}),
+		log:    runtimeLog,
 	}
 }
 
@@ -71,7 +74,12 @@ func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
 
 		if err := handler(ctx, task); err != nil {
 			taskID, _ := asynq.GetTaskID(ctx)
-			log.Printf("[asynqbroker] handler error: type=%s, task_id=%s, err=%v", taskType, taskID, err)
+			c.log.ErrorContext(ctx, "task handler returned error",
+				logger.FieldTaskType, taskType,
+				logger.FieldTaskID, taskID,
+				logger.FieldQueue, queueName,
+				logger.FieldError, err,
+			)
 			return err
 		}
 		return nil

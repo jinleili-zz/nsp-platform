@@ -239,6 +239,7 @@ examples/
 
 - `NewEngine` 当前签名为 `NewEngine(cfg *Config) (*Engine, error)`
 - `Config` 包含 `CredentialStore auth.CredentialStore`，用于给步骤出站请求执行可选 AK/SK 签名
+- `Config` 还包含可选 `Logger logger.Logger`；未显式注入时，`saga` 运行时日志默认走 `logger.Platform()`，并在后台协调/轮询路径上优先从事务 payload 的 `_trace_id`、`_span_id` 重建 trace 上下文
 - `Step` 当前包含 `AuthAK string` 字段；当非空时，执行器会通过 `CredentialStore` 查凭证并对请求进行 `NSP-HMAC-SHA256` 签名
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
 - `SagaBuilder` 除 `AddStep` 外，还支持 `WithTimeout` 和 `WithPayload`
@@ -298,18 +299,20 @@ examples/
 
 - `auth`、`trace` 主要是单元测试
 - `saga` 依赖真实 PostgreSQL，测试前需要设置 `TEST_DSN`
+- 凡是测试或示例依赖 PostgreSQL、Redis 等外部服务时，相关用户名、密码、主机、端口、DSN、URL 一律从环境变量读取，不得在测试代码、脚本或命令示例中写死
+- PostgreSQL 连接信息统一通过类似 `TEST_DSN` / `SAGA_OBSERVER_DSN` 这类环境变量传入；Redis 连接信息统一通过类似 `REDIS_ADDR` 的环境变量传入
 - 数据库初始化脚本使用 `saga/migrations/saga.sql`
 
 示例：
 
 ```bash
-TEST_DSN="postgres://user:pass@localhost:5432/saga_test?sslmode=disable" go test ./saga
+TEST_DSN="$TEST_DSN" go test ./saga
 ```
 
 如果运行环境对默认 Go build cache 目录有写限制，可显式指定临时缓存目录，例如：
 
 ```bash
-GOCACHE=/tmp/go-build TEST_DSN="postgres://user:pass@localhost:5432/saga_test?sslmode=disable" go test ./saga
+GOCACHE=/tmp/go-build TEST_DSN="$TEST_DSN" go test ./saga
 ```
 
 ## 文档维护要求

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"sync"
@@ -15,16 +14,23 @@ import (
 	"github.com/hibiken/asynq"
 
 	replydemo "github.com/jinleili-zz/nsp-platform/examples/taskqueue-reply-demo"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
 	"github.com/jinleili-zz/nsp-platform/taskqueue/asynqbroker"
 )
 
 func main() {
+	if err := logger.Init(logger.DevelopmentConfig("taskqueue-reply-producer")); err != nil {
+		panic(err)
+	}
+	defer logger.Sync()
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
 	opt := asynq.RedisClientOpt{Addr: redisAddr}
+	runtimeLog := logger.Platform().With("example", "taskqueue-reply-producer")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -34,14 +40,14 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("Received shutdown signal")
+		runtimeLog.Info("received shutdown signal")
 		cancel()
 	}()
 
 	// ---------------------------------------------------------------
 	// 1. Initialize Broker for sending tasks
 	// ---------------------------------------------------------------
-	broker := asynqbroker.NewBroker(opt)
+	broker := asynqbroker.NewBrokerWithConfig(opt, asynqbroker.BrokerConfig{Logger: runtimeLog})
 	defer broker.Close()
 
 	// ---------------------------------------------------------------
@@ -65,6 +71,7 @@ func main() {
 		Queues: map[string]int{
 			replydemo.CalcResponseQueue: 1,
 		},
+		RuntimeLogger: runtimeLog,
 	})
 
 	replyConsumer.Handle(replydemo.TaskTypeCalcReply, func(ctx context.Context, t *taskqueue.Task) error {
@@ -77,18 +84,23 @@ func main() {
 		if item, ok := pending[result.TaskID]; ok {
 			item.result = &result
 			mu.Unlock()
-			log.Printf("[Reply] task_id=%s result=%.2f", result.TaskID[:8], result.Result)
+			logger.InfoContext(ctx, "received reply",
+				logger.FieldTaskID, result.TaskID,
+				"result", result.Result,
+			)
 			wg.Done()
 		} else {
 			mu.Unlock()
-			log.Printf("[Reply] ignored unknown task_id=%s", result.TaskID[:8])
+			logger.WarnContext(ctx, "ignored unknown reply task",
+				logger.FieldTaskID, result.TaskID,
+			)
 		}
 		return nil
 	})
 
 	go func() {
 		if err := replyConsumer.Start(ctx); err != nil {
-			log.Printf("Reply consumer stopped: %v", err)
+			runtimeLog.Error("reply consumer stopped", logger.FieldError, err)
 		}
 	}()
 
@@ -109,7 +121,7 @@ func main() {
 
 		payload, err := json.Marshal(ct)
 		if err != nil {
-			log.Fatalf("Failed to marshal task: %v", err)
+			runtimeLog.Fatal("failed to marshal task", logger.FieldError, err)
 		}
 
 		task := &taskqueue.Task{
@@ -132,11 +144,15 @@ func main() {
 			delete(pending, ct.TaskID)
 			mu.Unlock()
 			wg.Done()
-			log.Fatalf("Failed to publish task: %v", err)
+			runtimeLog.Fatal("failed to publish task", logger.FieldError, err)
 		}
 
-		log.Printf("[Send] task_id=%s op=%s operands=%v broker_id=%s",
-			ct.TaskID[:8], ct.Operation, ct.Operands, info.BrokerTaskID)
+		logger.InfoContext(ctx, "published calculation task",
+			logger.FieldTaskID, ct.TaskID,
+			"operation", ct.Operation,
+			"operands", ct.Operands,
+			"broker_task_id", info.BrokerTaskID,
+		)
 	}
 
 	// ---------------------------------------------------------------
@@ -150,9 +166,9 @@ func main() {
 
 	select {
 	case <-done:
-		log.Println("All replies received!")
+		runtimeLog.Info("all replies received")
 	case <-time.After(10 * time.Second):
-		log.Println("Timeout waiting for replies")
+		runtimeLog.Warn("timeout waiting for replies")
 	}
 
 	// ---------------------------------------------------------------
@@ -175,13 +191,13 @@ func main() {
 	// ---------------------------------------------------------------
 	// 7. Inspector demo: Queues, GetQueueStats, ListTasks
 	// ---------------------------------------------------------------
-	inspector := asynqbroker.NewInspector(opt)
+	inspector := asynqbroker.NewInspectorWithConfig(opt, asynqbroker.InspectorConfig{Logger: runtimeLog})
 	defer inspector.Close()
 
 	fmt.Println("\n=== Inspector: Queues ===")
 	queues, err := inspector.Queues(ctx)
 	if err != nil {
-		log.Printf("Failed to list queues: %v", err)
+		runtimeLog.Error("failed to list queues", logger.FieldError, err)
 	} else {
 		for _, q := range queues {
 			fmt.Printf("  %s\n", q)
@@ -203,7 +219,7 @@ func main() {
 	fmt.Println("\n=== Inspector: Completed Tasks ===")
 	taskResult, err := inspector.ListTasks(ctx, replydemo.CalcRequestQueue, taskqueue.TaskStateCompleted, nil)
 	if err != nil {
-		log.Printf("Failed to list tasks: %v", err)
+		runtimeLog.Error("failed to list tasks", logger.FieldError, err)
 	} else {
 		fmt.Printf("  Total completed: %d\n", taskResult.Total)
 		for _, t := range taskResult.Tasks {
@@ -213,5 +229,5 @@ func main() {
 
 	cancel()
 	replyConsumer.Stop()
-	log.Println("Producer done.")
+	runtimeLog.Info("producer done")
 }

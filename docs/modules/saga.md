@@ -96,6 +96,7 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 | `HTTPClient` | `*http.Client` | `nil` | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
 | `InstanceID` | `string` | 自动生成 | 实例唯一标识 |
 | `CredentialStore` | `auth.CredentialStore` | `nil` | 可选，用于步骤出站 AK/SK 签名 |
+| `Logger` | `logger.Logger` | `logger.Platform()` | 可选，SAGA 运行时日志出口；未显式注入时默认走 platform logger，并在后台路径优先重建事务 trace 上下文 |
 
 ### Step 配置
 
@@ -314,21 +315,33 @@ func deviceConfigTransaction(engine *saga.Engine, ctx context.Context) (string, 
 func queryTransaction(engine *saga.Engine, ctx context.Context, txID string) {
     status, err := engine.Query(ctx, txID)
     if err != nil {
-        log.Printf("查询失败: %v", err)
+        logger.ErrorContext(ctx, "查询事务失败", logger.FieldError, err)
         return
     }
     if status == nil {
-        log.Printf("事务不存在: %s", txID)
+        logger.WarnContext(ctx, "事务不存在", "tx_id", txID)
         return
     }
 
-    log.Printf("事务状态: %s", status.Status)
-    log.Printf("当前步骤: %d", status.CurrentStep)
+    logger.InfoContext(ctx, "事务状态",
+        "tx_id", status.ID,
+        "status", status.Status,
+        "current_step", status.CurrentStep,
+    )
 
     for _, step := range status.Steps {
-        log.Printf("  步骤 %d [%s]: %s", step.Index, step.Name, step.Status)
+        logger.InfoContext(ctx, "步骤状态",
+            "tx_id", status.ID,
+            "step_index", step.Index,
+            "step_name", step.Name,
+            "step_status", step.Status,
+        )
         if step.LastError != "" {
-            log.Printf("    错误: %s", step.LastError)
+            logger.WarnContext(ctx, "步骤错误",
+                "tx_id", status.ID,
+                "step_index", step.Index,
+                logger.FieldError, step.LastError,
+            )
         }
     }
 }

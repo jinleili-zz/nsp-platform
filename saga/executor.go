@@ -10,11 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/jinleili-zz/nsp-platform/auth"
+	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/trace"
 )
 
@@ -37,6 +37,8 @@ type ExecutorConfig struct {
 	// HTTPClient is the optional custom HTTP client used for all outbound requests.
 	// When non-nil, HTTPTimeout is ignored.
 	HTTPClient *http.Client
+	// Logger is the optional module runtime logger. Defaults to logger.Platform().
+	Logger logger.Logger
 }
 
 // DefaultExecutorConfig returns the default executor configuration.
@@ -52,6 +54,7 @@ type Executor struct {
 	store     Store
 	config    *ExecutorConfig
 	credStore auth.CredentialStore
+	log       logger.Logger
 }
 
 // NewExecutor creates a new Executor with the given store and configuration.
@@ -72,6 +75,7 @@ func NewExecutor(store Store, cfg *ExecutorConfig, credStore auth.CredentialStor
 		store:     store,
 		config:    cfg,
 		credStore: credStore,
+		log:       resolveSagaLogger(cfg.Logger),
 	}
 }
 
@@ -409,8 +413,11 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 func (e *Executor) handleHTTPError(ctx context.Context, step *Step, err error) error {
 	// Increment retry count
 	if incrementErr := e.store.IncrementStepRetry(ctx, step.ID); incrementErr != nil {
-		// Log but don't fail - use log package for structured logging capability
-		log.Printf("[saga] failed to increment retry count for step %s: %v", step.ID, incrementErr)
+		e.log.ErrorContext(ctx, "failed to increment step retry count",
+			appendStepLogFields([]any{
+				logger.FieldError, incrementErr,
+			}, step)...,
+		)
 	}
 	step.RetryCount++
 
