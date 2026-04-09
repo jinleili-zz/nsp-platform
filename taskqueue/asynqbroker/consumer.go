@@ -3,6 +3,7 @@ package asynqbroker
 import (
 	"context"
 	"log"
+	"sync"
 
 	"github.com/hibiken/asynq"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
@@ -22,8 +23,10 @@ type ConsumerConfig struct {
 
 // Consumer implements taskqueue.Consumer using asynq.
 type Consumer struct {
-	server *asynq.Server
-	mux    *asynq.ServeMux
+	server   *asynq.Server
+	mux      *asynq.ServeMux
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewConsumer creates an asynq-backed Consumer.
@@ -46,6 +49,7 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 	return &Consumer{
 		server: server,
 		mux:    asynq.NewServeMux(),
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -77,16 +81,24 @@ func (c *Consumer) Handle(taskType string, handler taskqueue.HandlerFunc) {
 // Start begins consuming messages. This method blocks until Stop is called
 // or the context is cancelled.
 func (c *Consumer) Start(ctx context.Context) error {
-	// Start a goroutine to watch for context cancellation
-	go func() {
-		<-ctx.Done()
-		c.server.Shutdown()
-	}()
-	return c.server.Run(c.mux)
+	if err := c.server.Start(c.mux); err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-c.stopCh:
+	}
+
+	c.server.Shutdown()
+	return nil
 }
 
 // Stop gracefully shuts down the consumer.
 func (c *Consumer) Stop() error {
-	c.server.Shutdown()
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+		c.server.Shutdown()
+	})
 	return nil
 }
