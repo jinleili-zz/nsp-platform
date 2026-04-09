@@ -41,11 +41,15 @@
 ### Requirement: Saga logger configuration is optional and non-breaking
 `saga.Config` SHALL 支持可选的 logger 注入，同时保持现有 `NewEngine(cfg *Config) (*Engine, error)` 构造方式不变。
 
-当调用方未显式配置 logger 时，`saga` 实现 SHALL 使用仓库默认全局 logger 作为回退。
+当调用方未显式配置 logger 时，`saga` 实现 SHALL 默认使用 `logger.Platform()` 作为模块运行日志出口；若应用未启用多分类 logger，该默认行为 SHALL 通过 `logger.Platform()` 的既有回退语义落到全局 logger。
 
-#### Scenario: Engine uses global logger by default
+#### Scenario: Engine uses platform logger by default
 - **WHEN** 调用方创建 `saga.Engine` 时未显式提供模块 logger
-- **THEN** `Engine`、`Coordinator`、`Poller` 和 `Executor` SHALL 继续正常工作，并使用仓库默认全局 logger 输出运行日志
+- **THEN** `Engine`、`Coordinator`、`Poller` 和 `Executor` SHALL 继续正常工作，并默认通过 `logger.Platform()` 输出运行日志
+
+#### Scenario: Engine falls back to global logger when multi-category logging is not initialized
+- **WHEN** 调用方创建 `saga.Engine` 时未显式提供模块 logger，且应用未初始化多分类 logger
+- **THEN** `saga` 默认日志行为 SHALL 继续可用，并通过 `logger.Platform()` 的回退机制落到全局 logger，而不是要求应用必须改动初始化代码
 
 #### Scenario: Engine uses injected logger when provided
 - **WHEN** 调用方在 `saga.Config` 中显式提供模块 logger

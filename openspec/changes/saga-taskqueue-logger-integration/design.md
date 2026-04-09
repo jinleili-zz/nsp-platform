@@ -40,7 +40,24 @@
 - 直接复用 `logger` 可以立刻获得字段化输出、trace 关联和统一配置
 - 相比自定义新接口，直接依赖现有 `logger.Logger` 成本更低、认知更一致
 
-### Decision 2: 优先在导出配置层增加“可选 logger 注入”，而不是修改核心接口
+### Decision 2: `saga` 默认使用 `logger.Platform()` 作为模块日志分类
+
+**选择**：
+- `saga` 在未显式注入模块 logger 时，默认使用 `logger.Platform()`
+- 若应用启用了 `logger.InitMultiCategory(...)`，`saga` 日志进入 platform 分类
+- 若应用未启用多分类，`logger.Platform()` 的既有回退语义继续生效，实际落到全局 logger
+
+**替代方案**：
+- 统一直接使用全局 logger，不显式选择日志分类
+- 将 `saga` 视为业务日志，默认使用 `logger.Business()`
+
+**理由**：
+- `saga` 在仓库中属于运行时基础设施组件，而不是业务层代码
+- 现有 `logger` 分类定义已将 `saga`、`asynq`、`redis`、`database` 这类组件归入 platform/framework 日志
+- 默认走 `logger.Platform()` 可以让启用多分类的应用单独控制 `saga` 日志的输出、级别和采样
+- 对未启用多分类的应用没有兼容性损失，因为 `logger.Platform()` 本身会回退到全局 logger
+
+### Decision 3: 优先在导出配置层增加“可选 logger 注入”，而不是修改核心接口
 
 **选择**：
 - 为 `saga.Config` 新增可选 logger 配置
@@ -56,7 +73,7 @@
 - 直接改核心接口会把一次日志改造升级为更大范围的 API 变更，不必要
 - 在配置层做可选字段是向后兼容的，适合当前仓库节奏
 
-### Decision 3: 具备 `context` 的运行路径一律使用 context-aware 日志接口
+### Decision 4: 具备 `context` 的运行路径一律使用 context-aware 日志接口
 
 **选择**：在 `saga` 的事务驱动路径和 `taskqueue/asynqbroker` 的消息处理路径上优先使用 `logger.*Context(...)`
 
@@ -69,7 +86,7 @@
 - trace 与日志关联是这次改造的核心收益之一，不该退化成手工字段复制
 - 统一使用 context-aware 接口更利于减少漏字段和后续审计
 
-### Decision 4: asynq 框架日志默认桥接到仓库 `logger`，但保留显式 `asynq.Logger` 覆盖
+### Decision 5: asynq 框架日志默认桥接到仓库 `logger`，但保留显式 `asynq.Logger` 覆盖
 
 **选择**：
 - 保留 `ConsumerConfig.Logger asynq.Logger` 的现有覆盖语义
@@ -85,7 +102,7 @@
 - 只改包装层日志而不处理 asynq 内部日志，会继续留下两套输出通道
 - 默认桥接 + 显式覆盖，是兼容性和一致性的平衡点
 
-### Decision 5: 先覆盖“明确属于运行时基础设施”的日志点，不扩大到所有工具路径
+### Decision 6: 先覆盖“明确属于运行时基础设施”的日志点，不扩大到所有工具路径
 
 **选择**：本次重点覆盖：
 - SAGA 后台协程与状态机驱动日志
@@ -125,6 +142,5 @@
 
 ## Open Questions
 
-- `saga` 运行日志默认应该走全局 logger，还是优先走 `logger.Platform()` / `logger.Business()` 这类分类 logger
 - `taskqueue/asynqbroker` 是否只给 `ConsumerConfig` 增加仓库 logger 配置，还是连 `Broker` / `Inspector` 的具体实现也补同样的入口
 - 是否需要在第一阶段同步清理 `examples/` 或文档中的标准库日志示例，还是只覆盖库本身运行时路径

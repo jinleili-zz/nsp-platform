@@ -5,6 +5,7 @@
 ## What Changes
 
 - 将 `saga` 模块中 `Engine`、`Coordinator`、`Poller`、`Executor` 的运行时日志统一改为通过仓库 `logger` 模块输出
+- 在未显式注入模块 logger 时，`saga` 默认使用 `logger.Platform()` 作为运行日志分类；未启用多分类时保持回退到全局 logger 的兼容行为
 - 将 `taskqueue/asynqbroker` 中 consumer 包装层和 broker 包内的运行时日志统一改为通过仓库 `logger` 模块输出
 - 为 `saga` 和 `taskqueue/asynqbroker` 暴露可选的 logger 注入配置，并保持现有核心接口和构造入口向后兼容
 - 在具备 `context.Context` 的路径上优先使用 context-aware 日志接口，保证 `trace_id`、`span_id` 能自动进入日志字段
