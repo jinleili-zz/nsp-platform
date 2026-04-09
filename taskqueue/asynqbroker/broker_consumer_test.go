@@ -110,7 +110,7 @@ func TestBrokerPublishError(t *testing.T) {
 	}
 }
 
-func TestConsumerStartAndStop(t *testing.T) {
+func TestConsumerStartReturnsOnContextCancel(t *testing.T) {
 	_, opt := newMiniredis(t)
 	consumer := NewConsumer(opt, ConsumerConfig{
 		Queues: map[string]int{"consume": 1},
@@ -140,6 +140,36 @@ func TestConsumerStartAndStop(t *testing.T) {
 
 	if err := consumer.Stop(); err != nil {
 		t.Fatalf("consumer.Stop() error = %v", err)
+	}
+}
+
+func TestConsumerStartReturnsOnStop(t *testing.T) {
+	_, opt := newMiniredis(t)
+	consumer := NewConsumer(opt, ConsumerConfig{
+		Queues: map[string]int{"consume": 1},
+		Logger: noopAsynqLogger{},
+	})
+	inspector := newInspectorForTest(t, opt)
+
+	ctx := context.Background()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- consumer.Start(ctx)
+	}()
+
+	waitForWorkers(t, inspector, 1)
+
+	if err := consumer.Stop(); err != nil {
+		t.Fatalf("consumer.Stop() error = %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("consumer.Start() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Start() to return after Stop()")
 	}
 }
 
