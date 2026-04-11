@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 // PollerConfig holds configuration for the Poller.
@@ -18,6 +20,8 @@ type PollerConfig struct {
 	BatchSize int
 	// InstanceID is the unique identifier for this instance (for distributed locking).
 	InstanceID string
+	// Logger is the optional module runtime logger. Defaults to logger.Platform().
+	Logger logger.Logger
 }
 
 // DefaultPollerConfig returns the default poller configuration.
@@ -54,6 +58,7 @@ type Poller struct {
 	notifyChan map[string]chan PollResult
 	stopCh     chan struct{}
 	wg         sync.WaitGroup
+	log        logger.Logger
 }
 
 // NewPoller creates a new Poller with the given store, executor, and configuration.
@@ -68,6 +73,7 @@ func NewPoller(store Store, executor *Executor, cfg *PollerConfig) *Poller {
 		config:     cfg,
 		notifyChan: make(map[string]chan PollResult),
 		stopCh:     make(chan struct{}),
+		log:        resolveSagaLogger(cfg.Logger),
 	}
 }
 
@@ -150,7 +156,10 @@ func (p *Poller) scanAndProcess(ctx context.Context) {
 	// Acquire poll tasks
 	tasks, err := p.store.AcquirePollTasks(ctx, p.config.InstanceID, p.config.BatchSize)
 	if err != nil {
-		fmt.Printf("failed to acquire poll tasks: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to acquire poll tasks",
+			sagaFieldInstance, p.config.InstanceID,
+			logger.FieldError, err,
+		)
 		return
 	}
 
@@ -168,15 +177,23 @@ func (p *Poller) scanAndProcess(ctx context.Context) {
 
 // processPollTask processes a single poll task.
 func (p *Poller) processPollTask(ctx context.Context, task *PollTask) {
+	taskFields := []any{
+		sagaFieldInstance, p.config.InstanceID,
+		sagaFieldTxID, task.TransactionID,
+		sagaFieldStepID, task.StepID,
+	}
+
 	// Get step information
 	step, err := p.store.GetStep(ctx, task.StepID)
 	if err != nil {
-		fmt.Printf("failed to get step %s: %v\n", task.StepID, err)
+		p.log.ErrorContext(ctx, "failed to load poll step",
+			append(taskFields, logger.FieldError, err)...,
+		)
 		p.releasePollTask(ctx, task.StepID)
 		return
 	}
 	if step == nil {
-		fmt.Printf("step %s not found, deleting poll task\n", task.StepID)
+		p.log.WarnContext(ctx, "poll step not found, deleting poll task", taskFields...)
 		p.store.DeletePollTask(ctx, task.StepID)
 		return
 	}
@@ -191,77 +208,107 @@ func (p *Poller) processPollTask(ctx context.Context, task *PollTask) {
 	// Get transaction information
 	tx, err := p.store.GetTransaction(ctx, task.TransactionID)
 	if err != nil || tx == nil {
-		fmt.Printf("failed to get transaction %s: %v\n", task.TransactionID, err)
+		p.log.ErrorContext(ctx, "failed to load poll transaction",
+			append(taskFields, logger.FieldError, err)...,
+		)
 		p.releasePollTask(ctx, task.StepID)
 		return
 	}
+	txCtx := rehydrateSagaTraceContext(ctx, tx)
 
 	// Get all steps for template rendering
-	allSteps, err := p.store.GetSteps(ctx, task.TransactionID)
+	allSteps, err := p.store.GetSteps(txCtx, task.TransactionID)
 	if err != nil {
-		fmt.Printf("failed to get steps for transaction %s: %v\n", task.TransactionID, err)
-		p.releasePollTask(ctx, task.StepID)
+		p.log.ErrorContext(txCtx, "failed to load steps for poll transaction",
+			appendStepLogFields(appendTransactionLogFields([]any{
+				sagaFieldInstance, p.config.InstanceID,
+				logger.FieldError, err,
+			}, tx), step)...,
+		)
+		p.releasePollTask(txCtx, task.StepID)
 		return
 	}
 
 	// Execute poll request
-	response, err := p.executor.Poll(ctx, tx, step, allSteps)
+	response, err := p.executor.Poll(txCtx, tx, step, allSteps)
 	if err != nil {
-		fmt.Printf("poll request failed for step %s: %v\n", step.ID, err)
+		p.log.ErrorContext(txCtx, "poll request failed",
+			appendStepLogFields(appendTransactionLogFields([]any{
+				sagaFieldInstance, p.config.InstanceID,
+				logger.FieldError, err,
+			}, tx), step)...,
+		)
 		if IsSigningError(err) {
-			p.handlePollFailure(ctx, task, step, err.Error())
+			p.handlePollFailure(txCtx, task, step, err.Error())
 			return
 		}
-		p.releasePollTask(ctx, task.StepID)
+		p.releasePollTask(txCtx, task.StepID)
 		return
 	}
 
 	// Check poll result
 	success, failure, err := MatchPollResult(response, step)
 	if err != nil {
-		fmt.Printf("failed to match poll result for step %s: %v\n", step.ID, err)
-		p.releasePollTask(ctx, task.StepID)
+		p.log.ErrorContext(txCtx, "failed to match poll result",
+			appendStepLogFields(appendTransactionLogFields([]any{
+				sagaFieldInstance, p.config.InstanceID,
+				logger.FieldError, err,
+			}, tx), step)...,
+		)
+		p.releasePollTask(txCtx, task.StepID)
 		return
 	}
 
 	if success {
 		// Poll succeeded
-		p.handlePollSuccess(ctx, task, step, response)
+		p.handlePollSuccess(txCtx, task, step, response)
 		return
 	}
 
 	if failure {
 		// Poll explicitly failed
-		p.handlePollFailure(ctx, task, step, "poll returned failure value")
+		p.handlePollFailure(txCtx, task, step, "poll returned failure value")
 		return
 	}
 
 	// Still processing - check if we've exceeded max poll attempts
 	if step.PollCount >= step.PollMaxTimes {
 		// Poll timeout
-		p.handlePollTimeout(ctx, task, step)
+		p.handlePollTimeout(txCtx, task, step)
 		return
 	}
 
 	// Still processing - schedule next poll
-	p.scheduleNextPoll(ctx, task, step)
+	p.scheduleNextPoll(txCtx, task, step)
 }
 
 // handlePollSuccess handles a successful poll result.
 func (p *Poller) handlePollSuccess(ctx context.Context, task *PollTask, step *Step, response map[string]any) {
 	// Update step response
 	if err := p.store.UpdateStepResponse(ctx, step.ID, response); err != nil {
-		fmt.Printf("failed to update step response: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to update step response after poll success",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Update step status to succeeded
 	if err := p.store.UpdateStepStatus(ctx, step.ID, StepStatusSucceeded, ""); err != nil {
-		fmt.Printf("failed to update step status to succeeded: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to mark step as succeeded after poll success",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Delete poll task
 	if err := p.store.DeletePollTask(ctx, task.StepID); err != nil {
-		fmt.Printf("failed to delete poll task: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to delete poll task after success",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Notify coordinator
@@ -272,12 +319,20 @@ func (p *Poller) handlePollSuccess(ctx context.Context, task *PollTask, step *St
 func (p *Poller) handlePollFailure(ctx context.Context, task *PollTask, step *Step, lastError string) {
 	// Update step status to failed
 	if err := p.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, lastError); err != nil {
-		fmt.Printf("failed to update step status to failed: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to mark step as failed after poll failure",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Delete poll task
 	if err := p.store.DeletePollTask(ctx, task.StepID); err != nil {
-		fmt.Printf("failed to delete poll task: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to delete poll task after failure",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Notify coordinator
@@ -289,12 +344,20 @@ func (p *Poller) handlePollTimeout(ctx context.Context, task *PollTask, step *St
 	// Update step status to failed
 	errMsg := fmt.Sprintf("poll timeout: exceeded %d attempts", step.PollMaxTimes)
 	if err := p.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, errMsg); err != nil {
-		fmt.Printf("failed to update step status to failed: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to mark step as failed after poll timeout",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Delete poll task
 	if err := p.store.DeletePollTask(ctx, task.StepID); err != nil {
-		fmt.Printf("failed to delete poll task: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to delete poll task after timeout",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Notify coordinator
@@ -308,7 +371,11 @@ func (p *Poller) scheduleNextPoll(ctx context.Context, task *PollTask, step *Ste
 
 	// Increment poll count and update next poll time
 	if err := p.store.IncrementStepPollCount(ctx, step.ID, nextPollAt); err != nil {
-		fmt.Printf("failed to increment poll count: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to reschedule next poll",
+			appendStepLogFields([]any{
+				logger.FieldError, err,
+			}, step)...,
+		)
 	}
 
 	// Release the poll task (unlock it)
@@ -318,6 +385,10 @@ func (p *Poller) scheduleNextPoll(ctx context.Context, task *PollTask, step *Ste
 // releasePollTask releases the lock on a poll task.
 func (p *Poller) releasePollTask(ctx context.Context, stepID string) {
 	if err := p.store.ReleasePollTask(ctx, stepID); err != nil {
-		fmt.Printf("failed to release poll task: %v\n", err)
+		p.log.ErrorContext(ctx, "failed to release poll task",
+			sagaFieldStepID, stepID,
+			sagaFieldInstance, p.config.InstanceID,
+			logger.FieldError, err,
+		)
 	}
 }

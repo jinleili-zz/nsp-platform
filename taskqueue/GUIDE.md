@@ -42,7 +42,11 @@ type Task struct {
 ## 发布任务
 
 ```go
-broker := asynqbroker.NewBroker(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
+runtimeLog := logger.Platform().With("module", "mail-worker")
+
+broker := asynqbroker.NewBrokerWithConfig(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}, asynqbroker.BrokerConfig{
+    Logger: runtimeLog,
+})
 defer broker.Close()
 
 body, _ := json.Marshal(map[string]any{
@@ -70,6 +74,7 @@ consumer := asynqbroker.NewConsumer(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}
         "mail:high": 30,
         "mail:low":  10,
     },
+    RuntimeLogger: runtimeLog,
 })
 
 consumer.Handle("email:send", func(ctx context.Context, task *taskqueue.Task) error {
@@ -85,6 +90,8 @@ consumer.Handle("email:send", func(ctx context.Context, task *taskqueue.Task) er
     return nil
 })
 ```
+
+如果不显式提供 `RuntimeLogger` / `BrokerConfig.Logger` / `InspectorConfig.Logger`，`asynqbroker` 默认使用仓库 `logger.Platform()` 记录运行时日志；如果 `ConsumerConfig.Logger` 为空，asynq 框架日志也会默认桥接到仓库 `logger`。
 
 ## Reply 约定
 
@@ -126,7 +133,9 @@ handler 拿到的 `task.Payload` 已经是业务原文，不需要自己解 `_v/
 ## Inspector
 
 ```go
-inspector := asynqbroker.NewInspector(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"})
+inspector := asynqbroker.NewInspectorWithConfig(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}, asynqbroker.InspectorConfig{
+    Logger: runtimeLog,
+})
 defer inspector.Close()
 
 stats, _ := inspector.GetQueueStats(ctx, "mail:high")

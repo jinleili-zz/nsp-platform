@@ -234,6 +234,8 @@ engine, err := saga.NewEngine(&saga.Config{
 
 当 `HTTPClient` 非 nil 时，SAGA 的同步步骤、异步步骤、补偿和轮询请求都会复用该 client，`HTTPTimeout` 不再生效。
 
+当 `Config.Logger` 为空时，SAGA 的运行时日志默认使用 `logger.Platform()`；如果应用启用了多分类日志，协调器、轮询器和执行器日志会进入 platform 分类，否则会按 `logger.Platform()` 的回退语义落到全局 logger。
+
 ### 2. 定义同步事务
 
 ```go
@@ -269,7 +271,7 @@ txID, err := engine.Submit(ctx, def)
 if err != nil {
     log.Fatal(err)
 }
-fmt.Printf("Transaction ID: %s\n", txID)
+logger.InfoContext(ctx, "transaction submitted", "tx_id", txID)
 ```
 
 ### 3. 定义异步事务（带轮询）
@@ -352,12 +354,19 @@ if err != nil {
     log.Fatal(err)
 }
 
-fmt.Printf("事务 ID: %s\n", status.ID)
-fmt.Printf("状态: %s\n", status.Status)
-fmt.Printf("当前步骤: %d\n", status.CurrentStep)
+logger.InfoContext(ctx, "事务状态",
+    "tx_id", status.ID,
+    "status", status.Status,
+    "current_step", status.CurrentStep,
+)
 
 for _, step := range status.Steps {
-    fmt.Printf("  步骤 %d (%s): %s\n", step.Index, step.Name, step.Status)
+    logger.InfoContext(ctx, "步骤状态",
+        "tx_id", status.ID,
+        "step_index", step.Index,
+        "step_name", step.Name,
+        "step_status", step.Status,
+    )
 }
 ```
 
@@ -421,6 +430,7 @@ PollSuccessValue: "success"
 | `HTTPTimeout` | Duration | 30s | HTTP 请求超时时间 |
 | `HTTPClient` | `*http.Client` | nil | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
 | `InstanceID` | string | auto | 实例 ID (自动生成: hostname-pid) |
+| `Logger` | `logger.Logger` | `logger.Platform()` | 可选，SAGA 运行时 logger；后台路径会优先从事务 payload 恢复 trace 上下文 |
 | `LeaseDuration` | Duration | 5m | 分布式锁租约时长 (Coordinator 内部配置) |
 
 ---

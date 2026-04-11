@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/jinleili-zz/nsp-platform/logger"
 )
 
 // CoordinatorConfig holds configuration for the Coordinator.
@@ -26,6 +28,8 @@ type CoordinatorConfig struct {
 	InstanceID string
 	// LeaseDuration is the duration of the distributed lock lease (default: 5 minutes).
 	LeaseDuration time.Duration
+	// Logger is the optional module runtime logger. Defaults to logger.Platform().
+	Logger logger.Logger
 }
 
 // DefaultCoordinatorConfig returns the default coordinator configuration.
@@ -54,6 +58,7 @@ type Coordinator struct {
 	// Track active transactions to prevent duplicate processing
 	activeTxMu sync.Mutex
 	activeTx   map[string]bool
+	log        logger.Logger
 }
 
 // NewCoordinator creates a new Coordinator with the given dependencies.
@@ -76,6 +81,7 @@ func NewCoordinator(store Store, executor *Executor, poller *Poller, cfg *Coordi
 		taskQueue: make(chan string, 1000),
 		stopCh:    make(chan struct{}),
 		activeTx:  make(map[string]bool),
+		log:       resolveSagaLogger(cfg.Logger),
 	}
 }
 
@@ -121,7 +127,10 @@ func (c *Coordinator) Submit(txID string) bool {
 		c.activeTxMu.Lock()
 		delete(c.activeTx, txID)
 		c.activeTxMu.Unlock()
-		fmt.Printf("transaction queue is full, dropping %s\n", txID)
+		c.log.Warn("transaction queue is full, dropping transaction",
+			sagaFieldInstance, c.config.InstanceID,
+			sagaFieldTxID, txID,
+		)
 		return false
 	}
 }
@@ -159,22 +168,26 @@ func (c *Coordinator) recoveryScan(ctx context.Context) {
 
 	txs, err := c.store.ListRecoverableTransactions(ctx, c.config.InstanceID, 100, c.config.LeaseDuration)
 	if err != nil {
-		fmt.Printf("failed to list recoverable transactions: %v\n", err)
+		c.log.ErrorContext(ctx, "failed to list recoverable transactions",
+			sagaFieldInstance, c.config.InstanceID,
+			logger.FieldError, err,
+		)
 		return
 	}
 
 	queued := 0
 	for i, tx := range txs {
+		txCtx := rehydrateSagaTraceContext(ctx, tx)
 		select {
 		case <-ctx.Done():
 			// Release locks for all remaining transactions
 			for _, remaining := range txs[i:] {
-				c.store.ReleaseTransaction(ctx, remaining.ID, c.config.InstanceID)
+				c.store.ReleaseTransaction(txCtx, remaining.ID, c.config.InstanceID)
 			}
 			return
 		case <-c.stopCh:
 			for _, remaining := range txs[i:] {
-				c.store.ReleaseTransaction(ctx, remaining.ID, c.config.InstanceID)
+				c.store.ReleaseTransaction(txCtx, remaining.ID, c.config.InstanceID)
 			}
 			return
 		default:
@@ -182,12 +195,16 @@ func (c *Coordinator) recoveryScan(ctx context.Context) {
 				queued++
 			} else {
 				// Queue full or already active, release the lock
-				c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
+				c.store.ReleaseTransaction(txCtx, tx.ID, c.config.InstanceID)
 			}
 		}
 	}
 
-	fmt.Printf("recovery scan complete: found %d, queued %d transactions\n", len(txs), queued)
+	c.log.InfoContext(ctx, "recovery scan complete",
+		sagaFieldInstance, c.config.InstanceID,
+		"found_transactions", len(txs),
+		"queued_transactions", queued,
+	)
 }
 
 // timeoutScanner periodically scans for timed-out transactions.
@@ -215,25 +232,34 @@ func (c *Coordinator) timeoutScanner(ctx context.Context) {
 func (c *Coordinator) scanTimeouts(ctx context.Context) {
 	txs, err := c.store.ListTimedOutTransactions(ctx, c.config.InstanceID, c.config.LeaseDuration)
 	if err != nil {
-		fmt.Printf("failed to list timed out transactions: %v\n", err)
+		c.log.ErrorContext(ctx, "failed to list timed out transactions",
+			sagaFieldInstance, c.config.InstanceID,
+			logger.FieldError, err,
+		)
 		return
 	}
 
 	for _, tx := range txs {
-		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, tx.Status, TxStatusCompensating, "transaction timeout")
+		txCtx := rehydrateSagaTraceContext(ctx, tx)
+		ok, err := c.store.UpdateTransactionStatusCAS(txCtx, tx.ID, tx.Status, TxStatusCompensating, "transaction timeout")
 		if err != nil {
-			fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
-			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
+			c.log.ErrorContext(txCtx, "failed to mark timed out transaction as compensating",
+				appendTransactionLogFields([]any{
+					sagaFieldInstance, c.config.InstanceID,
+					logger.FieldError, err,
+				}, tx)...,
+			)
+			c.store.ReleaseTransaction(txCtx, tx.ID, c.config.InstanceID)
 			continue
 		}
 		if !ok {
 			// CAS failed, another instance already handled this
-			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
+			c.store.ReleaseTransaction(txCtx, tx.ID, c.config.InstanceID)
 			continue
 		}
 		if !c.Submit(tx.ID) {
 			// Queue full, release the lock so other instances can pick it up
-			c.store.ReleaseTransaction(ctx, tx.ID, c.config.InstanceID)
+			c.store.ReleaseTransaction(txCtx, tx.ID, c.config.InstanceID)
 		}
 	}
 }
@@ -252,7 +278,11 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 	// Distributed claim: only one instance can drive this transaction
 	claimed, err := c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
 	if err != nil {
-		fmt.Printf("failed to claim transaction %s: %v\n", txID, err)
+		c.log.ErrorContext(ctx, "failed to claim transaction",
+			sagaFieldInstance, c.config.InstanceID,
+			sagaFieldTxID, txID,
+			logger.FieldError, err,
+		)
 		return
 	}
 	if !claimed {
@@ -274,26 +304,43 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 		// Get current transaction state
 		tx, err := c.store.GetTransaction(ctx, txID)
 		if err != nil {
-			fmt.Printf("failed to get transaction %s: %v\n", txID, err)
+			c.log.ErrorContext(ctx, "failed to load transaction",
+				sagaFieldInstance, c.config.InstanceID,
+				sagaFieldTxID, txID,
+				logger.FieldError, err,
+			)
 			return
 		}
 		if tx == nil {
-			fmt.Printf("transaction %s not found\n", txID)
+			c.log.WarnContext(ctx, "transaction not found during drive loop",
+				sagaFieldInstance, c.config.InstanceID,
+				sagaFieldTxID, txID,
+			)
 			return
 		}
+		txCtx := rehydrateSagaTraceContext(ctx, tx)
 
 		// Get all steps
-		steps, err := c.store.GetSteps(ctx, txID)
+		steps, err := c.store.GetSteps(txCtx, txID)
 		if err != nil {
-			fmt.Printf("failed to get steps for transaction %s: %v\n", txID, err)
+			c.log.ErrorContext(txCtx, "failed to load transaction steps",
+				appendTransactionLogFields([]any{
+					sagaFieldInstance, c.config.InstanceID,
+					logger.FieldError, err,
+				}, tx)...,
+			)
 			return
 		}
 
 		// Renew lease to prevent expiration during long-running steps
-		renewed, err := c.store.ClaimTransaction(ctx, txID, c.config.InstanceID, c.config.LeaseDuration)
+		renewed, err := c.store.ClaimTransaction(txCtx, txID, c.config.InstanceID, c.config.LeaseDuration)
 		if err != nil || !renewed {
 			// Lost the lock, another instance may have taken over
-			fmt.Printf("failed to renew lease for transaction %s, stopping\n", txID)
+			c.log.WarnContext(txCtx, "failed to renew transaction lease, stopping drive loop",
+				appendTransactionLogFields([]any{
+					sagaFieldInstance, c.config.InstanceID,
+				}, tx)...,
+			)
 			return
 		}
 
@@ -301,7 +348,7 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 		switch tx.Status {
 		case TxStatusPending:
 			// Use CAS to prevent concurrent status change
-			ok, err := c.store.UpdateTransactionStatusCAS(ctx, txID, TxStatusPending, TxStatusRunning, "")
+			ok, err := c.store.UpdateTransactionStatusCAS(txCtx, txID, TxStatusPending, TxStatusRunning, "")
 			if err != nil || !ok {
 				// CAS failed, another instance already transitioned
 				return
@@ -310,7 +357,7 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 
 		case TxStatusRunning:
 			// Execute next step
-			shouldContinue := c.executeNextStep(ctx, tx, steps)
+			shouldContinue := c.executeNextStep(txCtx, tx, steps)
 			if !shouldContinue {
 				return
 			}
@@ -318,7 +365,7 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 
 		case TxStatusCompensating:
 			// Execute compensation
-			c.executeCompensation(ctx, tx, steps)
+			c.executeCompensation(txCtx, tx, steps)
 			return
 
 		case TxStatusSucceeded, TxStatusFailed:
@@ -362,10 +409,16 @@ func (c *Coordinator) executeNextStep(ctx context.Context, tx *Transaction, step
 	if allSucceeded {
 		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusSucceeded, "")
 		if err != nil {
-			fmt.Printf("failed to CAS update transaction %s to succeeded: %v\n", tx.ID, err)
+			c.log.ErrorContext(ctx, "failed to mark transaction as succeeded",
+				appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx)...,
+			)
 		}
 		if !ok {
-			fmt.Printf("transaction %s status already changed, skip marking succeeded\n", tx.ID)
+			c.log.WarnContext(ctx, "transaction status already changed, skipping succeeded transition",
+				appendTransactionLogFields(nil, tx)...,
+			)
 		}
 		return false
 	}
@@ -415,7 +468,11 @@ func (c *Coordinator) executeSyncStep(ctx context.Context, tx *Transaction, step
 	if err == nil {
 		// Success - update current step and continue
 		if err := c.store.UpdateTransactionStep(ctx, tx.ID, step.Index+1); err != nil {
-			fmt.Printf("failed to update transaction step: %v\n", err)
+			c.log.ErrorContext(ctx, "failed to advance transaction step",
+				appendStepLogFields(appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx), step)...,
+			)
 		}
 		return true
 	}
@@ -461,7 +518,11 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	// arrived before channel registration does not strand the coordinator.
 	latestStep, err := c.store.GetStep(ctx, step.ID)
 	if err != nil {
-		fmt.Printf("failed to reload async step %s: %v\n", step.ID, err)
+		c.log.ErrorContext(ctx, "failed to reload async step state",
+			appendStepLogFields(appendTransactionLogFields([]any{
+				logger.FieldError, err,
+			}, tx), step)...,
+		)
 		return false
 	}
 	if latestStep == nil {
@@ -471,7 +532,11 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	switch latestStep.Status {
 	case StepStatusSucceeded:
 		if err := c.store.UpdateTransactionStep(ctx, tx.ID, latestStep.Index+1); err != nil {
-			fmt.Printf("failed to update transaction step: %v\n", err)
+			c.log.ErrorContext(ctx, "failed to advance transaction step after async success",
+				appendStepLogFields(appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx), latestStep)...,
+			)
 		}
 		return true
 	case StepStatusFailed:
@@ -503,7 +568,11 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 		case PollResultSuccess:
 			// Step succeeded, continue to next step
 			if err := c.store.UpdateTransactionStep(ctx, tx.ID, step.Index+1); err != nil {
-				fmt.Printf("failed to update transaction step: %v\n", err)
+				c.log.ErrorContext(ctx, "failed to advance transaction step after poll success",
+					appendStepLogFields(appendTransactionLogFields([]any{
+						logger.FieldError, err,
+					}, tx), step)...,
+				)
 			}
 			return true
 
@@ -526,10 +595,19 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, reason string) {
 	ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusCompensating, reason)
 	if err != nil {
-		fmt.Printf("failed to CAS update transaction %s to compensating: %v\n", tx.ID, err)
+		c.log.ErrorContext(ctx, "failed to switch transaction to compensating",
+			appendTransactionLogFields([]any{
+				logger.FieldError, err,
+				"reason", reason,
+			}, tx)...,
+		)
 	}
 	if !ok {
-		fmt.Printf("transaction %s status already changed, skip compensation trigger\n", tx.ID)
+		c.log.WarnContext(ctx, "transaction status already changed, skipping compensation trigger",
+			appendTransactionLogFields([]any{
+				"reason", reason,
+			}, tx)...,
+		)
 	}
 }
 
@@ -558,7 +636,11 @@ func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, 
 
 		err := c.executor.CompensateStep(ctx, tx, step, steps)
 		if err != nil {
-			fmt.Printf("compensation failed for step %s: %v\n", step.ID, err)
+			c.log.ErrorContext(ctx, "step compensation failed",
+				appendStepLogFields(appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx), step)...,
+			)
 			allCompensated = false
 			// Continue to try other compensations
 		}
@@ -568,7 +650,11 @@ func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, 
 	for _, step := range steps {
 		if step.Status == StepStatusPending {
 			if err := c.store.UpdateStepStatus(ctx, step.ID, StepStatusSkipped, ""); err != nil {
-				fmt.Printf("failed to mark step %s as skipped: %v\n", step.ID, err)
+				c.log.ErrorContext(ctx, "failed to mark step as skipped",
+					appendStepLogFields(appendTransactionLogFields([]any{
+						logger.FieldError, err,
+					}, tx), step)...,
+				)
 			}
 		}
 	}
@@ -576,12 +662,20 @@ func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, 
 	// Update transaction status
 	if allCompensated {
 		if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusFailed, "compensation completed"); err != nil {
-			fmt.Printf("failed to update transaction %s to failed: %v\n", tx.ID, err)
+			c.log.ErrorContext(ctx, "failed to mark transaction as failed after compensation",
+				appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx)...,
+			)
 		}
 	} else {
 		// Some compensations failed, needs manual intervention
 		if err := c.store.UpdateTransactionStatus(ctx, tx.ID, TxStatusFailed, "compensation partially failed, manual intervention required"); err != nil {
-			fmt.Printf("failed to update transaction %s: %v\n", tx.ID, err)
+			c.log.ErrorContext(ctx, "failed to persist partially failed compensation state",
+				appendTransactionLogFields([]any{
+					logger.FieldError, err,
+				}, tx)...,
+			)
 		}
 	}
 }
