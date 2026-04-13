@@ -21,7 +21,7 @@ func TestNewExecutorUsesInjectedHTTPClient(t *testing.T) {
 	customClient := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 
@@ -58,7 +58,7 @@ func TestExecuteStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/action" {
 				t.Fatalf("expected /action request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -97,7 +97,7 @@ func TestExecuteAsyncStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/async-action" {
 				t.Fatalf("expected /async-action request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"task_id":"task-1"}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","task_id":"task-1"}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -147,7 +147,7 @@ func TestCompensateStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/compensate" {
 				t.Fatalf("expected /compensate request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -183,7 +183,7 @@ func TestPollUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/poll" {
 				t.Fatalf("expected /poll request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"status":"success"}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","status":"success"}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{

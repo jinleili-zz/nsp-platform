@@ -234,6 +234,7 @@ examples/
 - `observer.NewReader`
 - `RenderTemplate`
 - `ExtractByPath`
+- `IsStepHTTPSuccess`
 
 ### 当前实现细节
 
@@ -242,6 +243,7 @@ examples/
 - `Config` 还包含可选 `Logger logger.Logger`；未显式注入时，`saga` 运行时日志默认走 `logger.Platform()`，并在后台协调/轮询路径上优先从事务 payload 的 `_trace_id`、`_span_id` 重建 trace 上下文
 - `Step` 当前包含 `AuthAK string` 字段；当非空时，执行器会通过 `CredentialStore` 查凭证并对请求进行 `NSP-HMAC-SHA256` 签名
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
+- `IsStepHTTPSuccess(statusCode int, body []byte)` 是统一的步骤 HTTP 成功判断函数；仅当 HTTP `2xx` 且响应体 JSON 顶层 `code == "0"`（兼容字符串 `"0"` 和数字 `0`）时判定成功
 - `SagaBuilder` 除 `AddStep` 外，还支持 `WithTimeout` 和 `WithPayload`
 - `SagaDefinition` 当前包含 `Payload map[string]any`
 - `Engine.Submit` 会将调用方 context 中的 trace 信息写入事务 payload：`_trace_id`、`_span_id`

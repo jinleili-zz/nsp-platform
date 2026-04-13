@@ -79,6 +79,42 @@ func NewExecutor(store Store, cfg *ExecutorConfig, credStore auth.CredentialStor
 	}
 }
 
+// IsStepHTTPSuccess reports whether a downstream step response is successful.
+// A response is successful only when the HTTP status is 2xx and the JSON body
+// contains a top-level code field equal to "0" (accepting numeric 0 as well).
+func IsStepHTTPSuccess(statusCode int, body []byte) (map[string]any, bool, error) {
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return nil, false, nil
+	}
+	if len(body) == 0 {
+		return nil, false, nil
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+
+	var response map[string]any
+	if err := decoder.Decode(&response); err != nil {
+		return nil, false, fmt.Errorf("failed to parse step response body: %w", err)
+	}
+
+	code, ok := response["code"]
+	if !ok {
+		return response, false, nil
+	}
+
+	switch v := code.(type) {
+	case string:
+		return response, v == "0", nil
+	case float64:
+		return response, v == 0, nil
+	case json.Number:
+		return response, v.String() == "0", nil
+	default:
+		return response, false, nil
+	}
+}
+
 // ExecuteStep executes a synchronous step's forward action.
 // Returns nil on success, ErrStepRetryable if retry is possible, ErrStepFatal if no more retries.
 func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step, allSteps []*Step) error {
@@ -152,17 +188,11 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 		return e.handleHTTPError(ctx, step, fmt.Errorf("failed to read response: %w", err))
 	}
 
-	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// Success - parse and store response
-		var response map[string]any
-		if len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, &response); err != nil {
-				// Try to store raw response
-				response = map[string]any{"raw": string(respBody)}
-			}
-		}
-
+	response, ok, err := IsStepHTTPSuccess(resp.StatusCode, respBody)
+	if err != nil {
+		return e.handleHTTPError(ctx, step, err)
+	}
+	if ok {
 		if err := e.store.UpdateStepResponse(ctx, step.ID, response); err != nil {
 			return fmt.Errorf("failed to update step response: %w", err)
 		}
@@ -256,16 +286,11 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 		return e.handleHTTPError(ctx, step, fmt.Errorf("failed to read response: %w", err))
 	}
 
-	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// Success - parse and store response
-		var response map[string]any
-		if len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, &response); err != nil {
-				response = map[string]any{"raw": string(respBody)}
-			}
-		}
-
+	response, ok, err := IsStepHTTPSuccess(resp.StatusCode, respBody)
+	if err != nil {
+		return e.handleHTTPError(ctx, step, err)
+	}
+	if ok {
 		if err := e.store.UpdateStepResponse(ctx, step.ID, response); err != nil {
 			return fmt.Errorf("failed to update step response: %w", err)
 		}
@@ -387,8 +412,12 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 			continue
 		}
 
-		// Check response status
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		_, ok, err = IsStepHTTPSuccess(resp.StatusCode, respBody)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if ok {
 			// Compensation successful
 			if err := e.store.UpdateStepStatus(ctx, step.ID, StepStatusCompensated, ""); err != nil {
 				return fmt.Errorf("failed to update step status to compensated: %w", err)
@@ -484,17 +513,15 @@ func (e *Executor) Poll(ctx context.Context, tx *Transaction, step *Step, allSte
 		return nil, fmt.Errorf("failed to read poll response: %w", err)
 	}
 
-	// Check response status
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("poll returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	response, ok, err := IsStepHTTPSuccess(resp.StatusCode, respBody)
+	if err != nil {
+		return nil, err
 	}
-
-	// Parse response
-	var response map[string]any
-	if len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, &response); err != nil {
-			return nil, fmt.Errorf("failed to parse poll response: %w", err)
+	if !ok {
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("poll returned HTTP %d: %s", resp.StatusCode, string(respBody))
 		}
+		return nil, fmt.Errorf("poll response was not successful: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return response, nil

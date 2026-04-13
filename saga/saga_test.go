@@ -354,13 +354,13 @@ func TestFullSyncTransaction(t *testing.T) {
 		switch r.URL.Path {
 		case "/step1/action":
 			step1Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step1_id": "S1-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "step1_id": "S1-001"})
 		case "/step2/action":
 			step2Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step2_id": "S2-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "step2_id": "S2-001"})
 		case "/step1/compensate":
 			comp1Called.Add(1)
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -451,7 +451,7 @@ func TestSyncStepFailureCompensation(t *testing.T) {
 		switch r.URL.Path {
 		case "/step1/action":
 			step1Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step1_id": "S1-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "step1_id": "S1-001"})
 		case "/step2/action":
 			step2Called.Add(1)
 			// Return error
@@ -459,7 +459,7 @@ func TestSyncStepFailureCompensation(t *testing.T) {
 			w.Write([]byte("step2 failed"))
 		case "/step1/compensate":
 			comp1Called.Add(1)
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -544,17 +544,17 @@ func TestAsyncStepPollingSuccess(t *testing.T) {
 		switch r.URL.Path {
 		case "/async/action":
 			actionCalled.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "task_id": "TASK-001"})
 		case "/async/status":
 			count := pollCount.Add(1)
 			if count >= 3 {
 				// Return success after 3 polls
-				json.NewEncoder(w).Encode(map[string]any{"status": "success"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "success"})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "pending"})
 			}
 		case "/async/compensate":
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -644,18 +644,18 @@ func TestAsyncStepPollingFailure(t *testing.T) {
 		switch r.URL.Path {
 		case "/async/action":
 			actionCalled.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "task_id": "TASK-001"})
 		case "/async/status":
 			count := pollCount.Add(1)
 			if count >= 2 {
 				// Return failure
-				json.NewEncoder(w).Encode(map[string]any{"status": "failed"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "failed"})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "pending"})
 			}
 		case "/async/compensate":
 			compCalled.Add(1)
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -738,10 +738,10 @@ func TestStepRetry(t *testing.T) {
 				w.Write([]byte("temporary error"))
 			} else {
 				// Succeed on third try
-				json.NewEncoder(w).Encode(map[string]any{"result": "ok"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "result": "ok"})
 			}
 		case "/retry/compensate":
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

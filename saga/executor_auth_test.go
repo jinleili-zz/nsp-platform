@@ -35,7 +35,7 @@ func TestExecuteStepSignsActionRequestWhenAuthAKConfigured(t *testing.T) {
 		capturedSignedHeaders = r.Header.Get(auth.HeaderSignedHeaders)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"code":"0","ok":true}`)),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -94,7 +94,7 @@ func TestExecuteStepLeavesRequestUnsignedWhenAuthAKEmpty(t *testing.T) {
 		capturedSignedHeaders = r.Header.Get(auth.HeaderSignedHeaders)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"code":"0","ok":true}`)),
 			Header:     make(http.Header),
 		}, nil
 	})}
@@ -192,13 +192,13 @@ func TestCompensateAndPollRequestsAreSignedWhenAuthAKConfigured(t *testing.T) {
 		case "/compensate":
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"0","ok":true}`)),
 				Header:     make(http.Header),
 			}, nil
 		case "/poll":
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"status":"success"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"0","status":"success"}`)),
 				Header:     make(http.Header),
 			}, nil
 		default:

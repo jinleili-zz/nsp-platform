@@ -111,11 +111,11 @@ func TestIntegration_AllSyncStepsSucceed(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/stock/deduct"):
 			atomic.AddInt32(&step1Called, 1)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"deducted": true})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "deducted": true})
 		case strings.Contains(r.URL.Path, "/orders"):
 			atomic.AddInt32(&step2Called, 1)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"order_id": "ORD-001"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "order_id": "ORD-001"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -174,10 +174,10 @@ func TestIntegration_SyncStepFailTriggersCompensation(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/stock/deduct"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"deducted": true})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "deducted": true})
 		case strings.Contains(r.URL.Path, "/stock/rollback"):
 			atomic.AddInt32(&compensateCalled, 1)
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		case strings.Contains(r.URL.Path, "/orders") && r.Method == "POST":
 			// Fail this step
 			w.WriteHeader(500)
@@ -241,17 +241,17 @@ func TestIntegration_AsyncStepPollSuccess(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/config/apply"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-100"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "task_id": "TASK-100"})
 		case strings.Contains(r.URL.Path, "/config/status"):
 			n := atomic.AddInt32(&pollCount, 1)
 			w.Header().Set("Content-Type", "application/json")
 			if n >= 3 {
-				json.NewEncoder(w).Encode(map[string]any{"status": "success"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "success"})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{"status": "processing"})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "processing"})
 			}
 		case strings.Contains(r.URL.Path, "/config/rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -309,18 +309,18 @@ func TestIntegration_AsyncStepPollFailure(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/stock/deduct"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"deducted": true})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "deducted": true})
 		case strings.Contains(r.URL.Path, "/stock/rollback"):
 			atomic.AddInt32(&compensateCalled, 1)
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		case strings.Contains(r.URL.Path, "/config/apply"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-200"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "task_id": "TASK-200"})
 		case strings.Contains(r.URL.Path, "/config/status"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"status": "failed"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "failed"})
 		case strings.Contains(r.URL.Path, "/config/rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -392,10 +392,10 @@ func TestIntegration_StepRetry(t *testing.T) {
 				w.Write([]byte(`{"error":"temporary failure"}`))
 			} else {
 				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{"ok": true})
+				json.NewEncoder(w).Encode(map[string]any{"code": "0", "ok": true})
 			}
 		case strings.Contains(r.URL.Path, "/rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -449,16 +449,16 @@ func TestIntegration_TransactionTimeout(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/stock/deduct"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"deducted": true})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "deducted": true})
 		case strings.Contains(r.URL.Path, "/stock/rollback"):
 			atomic.AddInt32(&compensateCalled, 1)
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		case strings.Contains(r.URL.Path, "/slow"):
 			// This step hangs long enough for the transaction to timeout
 			time.Sleep(60 * time.Second)
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		case strings.Contains(r.URL.Path, "/slow-rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -519,15 +519,15 @@ func TestIntegration_CrashRecovery(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/step1"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"result": "ok1"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "result": "ok1"})
 		case strings.Contains(r.URL.Path, "/step2"):
 			// Block until gate is opened (simulates slow step during crash)
 			<-step1Gate
 			atomic.AddInt32(&step2Called, 1)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"result": "ok2"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "result": "ok2"})
 		case strings.Contains(r.URL.Path, "/rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -614,14 +614,14 @@ func TestIntegration_AsyncPollTimeout(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/config/apply"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-300"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "task_id": "TASK-300"})
 		case strings.Contains(r.URL.Path, "/config/status"):
 			// Always return processing — never finishes
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"status": "processing"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "status": "processing"})
 		case strings.Contains(r.URL.Path, "/config/rollback"):
 			atomic.AddInt32(&compensateCalled, 1)
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -683,7 +683,7 @@ func TestIntegration_IdempotencyKeyPropagated(t *testing.T) {
 		receivedTxID = r.Header.Get("X-Saga-Transaction-Id")
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		json.NewEncoder(w).Encode(map[string]any{"code": "0", "ok": true})
 	}))
 	defer svc.Close()
 
@@ -742,7 +742,7 @@ func TestIntegration_MultiInstanceExclusivity(t *testing.T) {
 			instanceHits.Store(txID, true)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		json.NewEncoder(w).Encode(map[string]any{"code": "0", "ok": true})
 	}))
 	defer svc.Close()
 
@@ -823,14 +823,14 @@ func TestIntegration_MultiInstanceCrashRecovery(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/step1"):
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"result": "ok1"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "result": "ok1"})
 		case strings.Contains(r.URL.Path, "/step2"):
 			<-step2Gate
 			atomic.AddInt32(&step2Called, 1)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"result": "ok2"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "result": "ok2"})
 		case strings.Contains(r.URL.Path, "/rollback"):
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -918,16 +918,16 @@ func TestIntegration_TemplateRendering(t *testing.T) {
 		switch {
 		case strings.Contains(r.URL.Path, "/orders") && r.Method == "POST":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"order_id": "ORD-777"})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "order_id": "ORD-777"})
 		case strings.Contains(r.URL.Path, "/fail"):
 			w.WriteHeader(500)
 		case strings.Contains(r.URL.Path, "/orders/"):
 			mu.Lock()
 			compensateURL = r.URL.Path
 			mu.Unlock()
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
-			w.WriteHeader(200)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		}
 	}))
 	defer svc.Close()
@@ -986,7 +986,7 @@ func TestIntegration_TemplateRendering(t *testing.T) {
 func TestIntegration_ConcurrentMultiInstance(t *testing.T) {
 	svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		json.NewEncoder(w).Encode(map[string]any{"code": "0", "ok": true})
 	}))
 	defer svc.Close()
 

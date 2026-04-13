@@ -375,7 +375,7 @@ func TestCoordinatorExecuteCompensationRetriesStepLeftCompensating(t *testing.T)
 		compensateCalls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("")),
+			Body:       io.NopCloser(strings.NewReader(`{"code":"0"}`)),
 			Header:     make(http.Header),
 		}, nil
 	}), nil, &CoordinatorConfig{})

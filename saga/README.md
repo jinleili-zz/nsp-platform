@@ -51,6 +51,14 @@ SAGA 模块是一个嵌入式的分布式事务 SDK，以后台 goroutine 方式
 | **Template** | `template.go` | 模板引擎，渲染动态 URL 和 Payload |
 | **JSONPath** | `jsonpath.go` | JSONPath 解析，用于轮询结果判断 |
 
+### 步骤 HTTP 成功判定
+
+- `IsStepHTTPSuccess(statusCode int, body []byte) (map[string]any, bool, error)` 是统一的步骤 HTTP 成功判断函数
+- `ExecuteStep`、`ExecuteAsyncStep`、`CompensateStep` 和 `Poll` 都要求下游先返回 HTTP `2xx`
+- 响应体还必须是 JSON 对象，并包含顶层 `code == "0"`；字符串 `"0"` 和数字 `0` 都视为成功
+- 空 body、非 JSON、缺少 `code` 或 `code != "0"` 都视为失败
+- 对异步轮询，只有通过这层检查后，才会继续使用 `PollSuccessPath` / `PollFailurePath` 判断业务状态
+
 ---
 
 ## 状态机设计

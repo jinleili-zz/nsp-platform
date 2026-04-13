@@ -70,6 +70,7 @@ func (e *Engine) Start(ctx context.Context) error
 func (e *Engine) Stop() error
 func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error)
 func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, error)
+func IsStepHTTPSuccess(statusCode int, body []byte) (map[string]any, bool, error)
 
 // SagaBuilder 构建器
 func NewSaga(name string) *SagaBuilder
@@ -124,6 +125,14 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 | `PollSuccessValue` | `string` | 成功判断的期望值 |
 | `PollFailurePath` | `string` | 失败判断的 JSONPath |
 | `PollFailureValue` | `string` | 失败判断的期望值 |
+
+### 步骤 HTTP 成功判定
+
+- `ExecuteStep`、`ExecuteAsyncStep`、`CompensateStep` 和 `Poll` 都使用 `IsStepHTTPSuccess`
+- 成功条件固定为：HTTP 状态码在 `2xx`，且响应体是 JSON 对象并包含顶层 `code == "0"`
+- `code` 兼容字符串 `"0"` 与数字 `0`
+- 空 body、非 JSON、缺少 `code` 或 `code != "0"` 都视为失败
+- 对异步步骤的 `Poll` 来说，只有先通过这层 `code == "0"` 校验，才会继续用 `PollSuccessPath` / `PollFailurePath` 判断业务状态
 
 ---
 
