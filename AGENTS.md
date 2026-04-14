@@ -271,6 +271,22 @@ examples/
 - 所有建表和索引语句均使用 `IF NOT EXISTS`
 - 迁移末尾包含 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` 兼容已有库
 
+## TaskQueue 模块
+
+包路径：
+
+`github.com/jinleili-zz/nsp-platform/taskqueue`
+
+当前 asynq 适配实现位于：
+
+- `taskqueue/asynqbroker`
+
+### 当前实现细节
+
+- `asynqbroker.ConsumerConfig` 当前包含 `Concurrency`、`Queues`、`StrictPriority`、`TaskCheckInterval`、`Logger`、`RuntimeLogger`
+- `TaskCheckInterval` 零值和负值都会保持 asynq 内部默认 `1 * time.Second`
+- 正值会被限制在 `[200ms, 2s]` 范围内；越界时使用 clamp 后的值，并通过运行时日志输出 warn
+
 ## 示例与中间件顺序
 
 当前示例服务位于：
