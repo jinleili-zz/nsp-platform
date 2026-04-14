@@ -14,9 +14,9 @@
 
 ### Requirement: TaskCheckInterval minimum boundary enforcement
 
-The system SHALL enforce a minimum value of `200ms` for `TaskCheckInterval`.
+For positive values, the system SHALL enforce a minimum value of `200ms` for `TaskCheckInterval`. Zero and negative values are handled by a separate requirement (see "Negative TaskCheckInterval treated as zero").
 
-#### Scenario: Value below minimum is clamped
+#### Scenario: Positive value below minimum is clamped
 - **WHEN** `ConsumerConfig.TaskCheckInterval` is set to `100ms`
 - **THEN** the effective value passed to asynq MUST be `200ms`
 
@@ -54,7 +54,7 @@ The package SHALL export `MinTaskCheckInterval` and `MaxTaskCheckInterval` const
 
 ### Requirement: Clamped value triggers warning log
 
-When the provided `TaskCheckInterval` is clamped (below min or above max), the system SHALL emit a warning-level log message indicating the original value and the clamped result.
+When a positive `TaskCheckInterval` is clamped (below min or above max), the system SHALL emit a warning-level log message indicating the original value and the clamped result. Zero and negative values that fall back to default SHALL NOT emit a warning.
 
 #### Scenario: Below-minimum value logs warning
 - **WHEN** `ConsumerConfig.TaskCheckInterval` is set to `50ms`
