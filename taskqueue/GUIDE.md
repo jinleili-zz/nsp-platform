@@ -69,7 +69,8 @@ info, err := broker.Publish(ctx, &taskqueue.Task{
 
 ```go
 consumer := asynqbroker.NewConsumer(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}, asynqbroker.ConsumerConfig{
-    Concurrency: 4,
+    Concurrency:       4,
+    TaskCheckInterval: 500 * time.Millisecond,
     Queues: map[string]int{
         "mail:high": 30,
         "mail:low":  10,
@@ -92,6 +93,8 @@ consumer.Handle("email:send", func(ctx context.Context, task *taskqueue.Task) er
 ```
 
 如果不显式提供 `RuntimeLogger` / `BrokerConfig.Logger` / `InspectorConfig.Logger`，`asynqbroker` 默认使用仓库 `logger.Platform()` 记录运行时日志；如果 `ConsumerConfig.Logger` 为空，asynq 框架日志也会默认桥接到仓库 `logger`。
+
+`ConsumerConfig.TaskCheckInterval` 用于控制所有队列都空闲时，consumer 轮询新任务的间隔。`0` 或负值不会显式传给 asynq，保持其内部默认值 `1s`；正值会被限制在 `[200ms, 2s]` 范围内，越界时会自动钳制并通过运行时日志输出 warn。
 
 ## Reply 约定
 

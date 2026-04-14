@@ -3,10 +3,18 @@ package asynqbroker
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/jinleili-zz/nsp-platform/logger"
 	"github.com/jinleili-zz/nsp-platform/taskqueue"
+)
+
+const (
+	// MinTaskCheckInterval is the minimum supported polling interval for empty queues.
+	MinTaskCheckInterval = 200 * time.Millisecond
+	// MaxTaskCheckInterval is the maximum supported polling interval for empty queues.
+	MaxTaskCheckInterval = 2 * time.Second
 )
 
 // ConsumerConfig holds configuration for the asynq consumer.
@@ -17,6 +25,9 @@ type ConsumerConfig struct {
 	Queues map[string]int
 	// StrictPriority enables strict priority ordering.
 	StrictPriority bool
+	// TaskCheckInterval controls empty-queue polling.
+	// Zero and negative values keep asynq's default. Positive values are clamped to [MinTaskCheckInterval, MaxTaskCheckInterval].
+	TaskCheckInterval time.Duration
 	// Logger is the asynq logger. If nil, asynq's default logger is used.
 	Logger asynq.Logger
 	// RuntimeLogger is the optional repository logger for wrapper runtime logs.
@@ -38,12 +49,23 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 		cfg.Concurrency = 2
 	}
 
+	runtimeLog := resolveRuntimeLogger(cfg.RuntimeLogger)
+	taskCheckInterval, clamped := normalizeTaskCheckInterval(cfg.TaskCheckInterval)
+	if clamped {
+		runtimeLog.Warn("consumer task check interval clamped",
+			"original", cfg.TaskCheckInterval.String(),
+			"clamped", taskCheckInterval.String(),
+		)
+	}
+
 	asynqCfg := asynq.Config{
 		Concurrency:    cfg.Concurrency,
 		Queues:         cfg.Queues,
 		StrictPriority: cfg.StrictPriority,
 	}
-	runtimeLog := resolveRuntimeLogger(cfg.RuntimeLogger)
+	if taskCheckInterval > 0 {
+		asynqCfg.TaskCheckInterval = taskCheckInterval
+	}
 	asynqCfg.Logger = resolveFrameworkLogger(runtimeLog, cfg.Logger)
 
 	server := asynq.NewServer(opt, asynqCfg)
@@ -54,6 +76,19 @@ func NewConsumer(opt asynq.RedisConnOpt, cfg ConsumerConfig) *Consumer {
 		stopCh: make(chan struct{}),
 		log:    runtimeLog,
 	}
+}
+
+func normalizeTaskCheckInterval(interval time.Duration) (time.Duration, bool) {
+	if interval <= 0 {
+		return 0, false
+	}
+	if interval < MinTaskCheckInterval {
+		return MinTaskCheckInterval, true
+	}
+	if interval > MaxTaskCheckInterval {
+		return MaxTaskCheckInterval, true
+	}
+	return interval, false
 }
 
 // Handle registers a handler for the given task type.
