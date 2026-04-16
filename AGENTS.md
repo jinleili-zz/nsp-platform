@@ -186,7 +186,7 @@ examples/
 ### 当前代码结构
 
 - `definition.go`：事务定义、步骤定义、Builder
-- `engine.go`：引擎入口，对外暴露 `NewEngine`、`Start`、`Stop`、`Submit`、`Query`
+- `engine.go`：引擎入口，对外暴露 `NewEngine`、`Start`、`Stop`、`Submit`、`SubmitAndWait`、`Query`
 - `coordinator.go`：状态机驱动与事务协调
 - `executor.go`：HTTP 执行器，支持同步步骤、异步步骤、补偿、可选 AK/SK 签名
 - `poller.go`：异步步骤轮询
@@ -215,9 +215,12 @@ examples/
 - `(*Engine).Start`
 - `(*Engine).Stop`
 - `(*Engine).Submit`
+- `(*Engine).SubmitAndWait`
 - `(*Engine).Query`
 - `(*Engine).Store`
 - `(*Engine).DB`
+- `ErrTransactionFailed`
+- `ErrTransactionDisappeared`
 - `TransactionStatus`
 - `StepStatusView`
 - `Store`
@@ -238,13 +241,20 @@ examples/
 ### 当前实现细节
 
 - `NewEngine` 当前签名为 `NewEngine(cfg *Config) (*Engine, error)`
+- `SubmitAndWait` 当前签名为 `SubmitAndWait(ctx context.Context, def *SagaDefinition) (string, *TransactionStatus, error)`
 - `Config` 包含 `CredentialStore auth.CredentialStore`，用于给步骤出站请求执行可选 AK/SK 签名
 - `Config` 还包含可选 `Logger logger.Logger`；未显式注入时，`saga` 运行时日志默认走 `logger.Platform()`，并在后台协调/轮询路径上优先从事务 payload 的 `_trace_id`、`_span_id` 重建 trace 上下文
 - `Step` 当前包含 `AuthAK string` 字段；当非空时，执行器会通过 `CredentialStore` 查凭证并对请求进行 `NSP-HMAC-SHA256` 签名
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
+- `SubmitAndWait` 只控制当前调用的提交与等待生命周期；Saga 事务自身超时仍由 `SagaBuilder.WithTimeout` / `SagaDefinition.TimeoutSec` 决定
+- `SubmitAndWait` 通过轮询 `Query` 等待终态：成功时返回 `nil` error，事务终态失败时返回可被 `errors.Is(err, saga.ErrTransactionFailed)` 识别的错误，提交后事务消失时返回可被 `errors.Is(err, saga.ErrTransactionDisappeared)` 识别的错误
+- `SubmitAndWait` 的两个哨兵错误可能被包装；调用方应使用 `errors.Is` 判断，不要用 `==`
+- `SubmitAndWait` 若因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误，`status` 仅表示最后一次已知状态，可能为 `nil`
+- `SubmitAndWait` 可被多个 goroutine 并发安全调用；它依赖同一存储上至少一个运行中的 engine 实例推进事务，不要求必须由当前实例执行
 - `SagaBuilder` 除 `AddStep` 外，还支持 `WithTimeout` 和 `WithPayload`
 - `SagaDefinition` 当前包含 `Payload map[string]any`
 - `Engine.Submit` 会将调用方 context 中的 trace 信息写入事务 payload：`_trace_id`、`_span_id`
+- 当前实现下，如果事务已持久化但 coordinator 本地入队失败，且后续没有新的恢复机会，事务可能长时间停留在 `pending`；若存在活跃执行者且配置了事务超时，`timeoutScanner` 仍可能在超时后接手推进补偿路径
 - Store 接口当前不仅包含基础 CRUD，还包含：
   - `CreateTransactionWithSteps`
   - `ClaimTransaction`

@@ -43,7 +43,7 @@ SAGA 模块是一个嵌入式的分布式事务 SDK，以后台 goroutine 方式
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| **Engine** | `engine.go` | 引擎入口，提供 Submit/Query/Start/Stop API |
+| **Engine** | `engine.go` | 引擎入口，提供 Submit/SubmitAndWait/Query/Start/Stop API |
 | **Coordinator** | `coordinator.go` | 协调器，状态机驱动事务执行流程 |
 | **Executor** | `executor.go` | 执行器，负责 HTTP 调用（正向/补偿/轮询） |
 | **Poller** | `poller.go` | 轮询器，处理异步步骤的状态查询 |
@@ -346,7 +346,37 @@ def, err := saga.NewSaga("transfer").
     Build()
 ```
 
-### 5. 查询事务状态
+### 5. 阻塞等待终态
+
+```go
+txID, status, err := engine.SubmitAndWait(ctx, def)
+if errors.Is(err, saga.ErrTransactionFailed) {
+    log.Printf("事务最终失败 txID=%s status=%s last_error=%s", txID, status.Status, status.LastError)
+    return
+}
+if errors.Is(err, saga.ErrTransactionDisappeared) {
+    log.Printf("事务在等待期间消失 txID=%s err=%v", txID, err)
+    return
+}
+if err != nil {
+    log.Fatal(err)
+}
+
+log.Printf("事务成功 txID=%s status=%s", txID, status.Status)
+```
+
+说明：
+
+- `Submit` 适合异步提交后由调用方自行轮询或观测。
+- `SubmitAndWait` 适合当前请求必须拿到最终结果的场景。
+- `SubmitAndWait` 只控制当前调用的等待生命周期；事务自身超时仍由 `WithTimeout` 控制。
+- `ErrTransactionFailed` 与 `ErrTransactionDisappeared` 可能被包装，调用方应使用 `errors.Is` 判断。
+- 当 `SubmitAndWait` 因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误时，`status` 只保证是最后一次已知状态，可能为 `nil`；读取 `status.Status` 前应先判空。
+- `SubmitAndWait` 可被多个 goroutine 并发安全调用。
+- `SubmitAndWait` 依赖至少一个连接同一存储的运行中 engine 实例推进事务，不要求必须由当前实例执行。
+- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；若存在活跃执行者且事务配置了超时，`timeoutScanner` 仍可能在超时后推进补偿路径。
+
+### 6. 查询事务状态
 
 ```go
 status, err := engine.Query(ctx, txID)

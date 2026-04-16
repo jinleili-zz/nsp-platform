@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -408,37 +409,26 @@ func TestFullSyncTransaction(t *testing.T) {
 		t.Fatalf("Failed to build saga: %v", err)
 	}
 
-	txID, err := engine.Submit(ctx, def)
+	txID, status, err := engine.SubmitAndWait(ctx, def)
 	if err != nil {
-		t.Fatalf("Failed to submit saga: %v", err)
+		t.Fatalf("SubmitAndWait() error = %v", err)
 	}
-
-	// Wait for completion
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := engine.Query(ctx, txID)
-		if err != nil {
-			t.Fatalf("Failed to query status: %v", err)
-		}
-		if status.Status == string(TxStatusSucceeded) {
-			// Verify steps were called
-			if step1Called.Load() < 1 {
-				t.Error("step1 was not called")
-			}
-			if step2Called.Load() < 1 {
-				t.Error("step2 was not called")
-			}
-			if comp1Called.Load() > 0 {
-				t.Error("compensation should not have been called")
-			}
-			return
-		}
-		if status.Status == string(TxStatusFailed) {
-			t.Fatalf("Transaction failed: %s", status.LastError)
-		}
-		time.Sleep(100 * time.Millisecond)
+	if txID == "" {
+		t.Fatal("SubmitAndWait() txID = empty, want persisted transaction id")
 	}
-	t.Fatal("Transaction did not complete in time")
+	if status == nil || status.Status != string(TxStatusSucceeded) {
+		t.Fatalf("SubmitAndWait() status = %#v, want succeeded", status)
+	}
+	// Verify steps were called
+	if step1Called.Load() < 1 {
+		t.Error("step1 was not called")
+	}
+	if step2Called.Load() < 1 {
+		t.Error("step2 was not called")
+	}
+	if comp1Called.Load() > 0 {
+		t.Error("compensation should not have been called")
+	}
 }
 
 // TestSyncStepFailureCompensation tests compensation when a sync step fails
@@ -507,31 +497,23 @@ func TestSyncStepFailureCompensation(t *testing.T) {
 		t.Fatalf("Failed to build saga: %v", err)
 	}
 
-	txID, err := engine.Submit(ctx, def)
-	if err != nil {
-		t.Fatalf("Failed to submit saga: %v", err)
+	txID, status, err := engine.SubmitAndWait(ctx, def)
+	if !errors.Is(err, ErrTransactionFailed) {
+		t.Fatalf("SubmitAndWait() error = %v, want ErrTransactionFailed", err)
 	}
-
-	// Wait for completion
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := engine.Query(ctx, txID)
-		if err != nil {
-			t.Fatalf("Failed to query status: %v", err)
-		}
-		if status.Status == string(TxStatusFailed) {
-			// Verify compensation was called
-			if step1Called.Load() < 1 {
-				t.Error("step1 was not called")
-			}
-			if comp1Called.Load() < 1 {
-				t.Error("step1 compensation was not called")
-			}
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+	if txID == "" {
+		t.Fatal("SubmitAndWait() txID = empty, want persisted transaction id")
 	}
-	t.Fatal("Transaction did not complete in time")
+	if status == nil || status.Status != string(TxStatusFailed) {
+		t.Fatalf("SubmitAndWait() status = %#v, want failed", status)
+	}
+	// Verify compensation was called
+	if step1Called.Load() < 1 {
+		t.Error("step1 was not called")
+	}
+	if comp1Called.Load() < 1 {
+		t.Error("step1 compensation was not called")
+	}
 }
 
 // TestAsyncStepPollingSuccess tests async step with polling
@@ -600,38 +582,22 @@ func TestAsyncStepPollingSuccess(t *testing.T) {
 		t.Fatalf("Failed to build saga: %v", err)
 	}
 
-	txID, err := engine.Submit(ctx, def)
+	txID, status, err := engine.SubmitAndWait(ctx, def)
 	if err != nil {
-		t.Fatalf("Failed to submit saga: %v", err)
+		t.Fatalf("SubmitAndWait() error = %v", err)
 	}
-
-	// Wait for completion
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := engine.Query(ctx, txID)
-		if err != nil {
-			t.Fatalf("Failed to query status: %v", err)
-		}
-		if status == nil {
-			t.Log("Query returned nil status")
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		if status.Status == string(TxStatusSucceeded) {
-			if actionCalled.Load() < 1 {
-				t.Error("action was not called")
-			}
-			if pollCount.Load() < 3 {
-				t.Errorf("expected at least 3 polls, got %d", pollCount.Load())
-			}
-			return
-		}
-		if status.Status == string(TxStatusFailed) {
-			t.Fatalf("Transaction failed: %s", status.LastError)
-		}
-		time.Sleep(200 * time.Millisecond)
+	if txID == "" {
+		t.Fatal("SubmitAndWait() txID = empty, want persisted transaction id")
 	}
-	t.Fatal("Transaction did not complete in time")
+	if status == nil || status.Status != string(TxStatusSucceeded) {
+		t.Fatalf("SubmitAndWait() status = %#v, want succeeded", status)
+	}
+	if actionCalled.Load() < 1 {
+		t.Error("action was not called")
+	}
+	if pollCount.Load() < 3 {
+		t.Errorf("expected at least 3 polls, got %d", pollCount.Load())
+	}
 }
 
 // TestAsyncStepPollingFailure tests async step polling failure
@@ -701,25 +667,16 @@ func TestAsyncStepPollingFailure(t *testing.T) {
 		t.Fatalf("Failed to build saga: %v", err)
 	}
 
-	txID, err := engine.Submit(ctx, def)
-	if err != nil {
-		t.Fatalf("Failed to submit saga: %v", err)
+	txID, status, err := engine.SubmitAndWait(ctx, def)
+	if !errors.Is(err, ErrTransactionFailed) {
+		t.Fatalf("SubmitAndWait() error = %v, want ErrTransactionFailed", err)
 	}
-
-	// Wait for completion
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := engine.Query(ctx, txID)
-		if err != nil {
-			t.Fatalf("Failed to query status: %v", err)
-		}
-		if status.Status == string(TxStatusFailed) {
-			// Transaction should fail after polling returns failure
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
+	if txID == "" {
+		t.Fatal("SubmitAndWait() txID = empty, want persisted transaction id")
 	}
-	t.Fatal("Transaction did not complete in time")
+	if status == nil || status.Status != string(TxStatusFailed) {
+		t.Fatalf("SubmitAndWait() status = %#v, want failed", status)
+	}
 }
 
 // TestStepRetry tests step retry functionality
@@ -780,31 +737,20 @@ func TestStepRetry(t *testing.T) {
 		t.Fatalf("Failed to build saga: %v", err)
 	}
 
-	txID, err := engine.Submit(ctx, def)
+	txID, status, err := engine.SubmitAndWait(ctx, def)
 	if err != nil {
-		t.Fatalf("Failed to submit saga: %v", err)
+		t.Fatalf("SubmitAndWait() error = %v", err)
 	}
-
-	// Wait for completion
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := engine.Query(ctx, txID)
-		if err != nil {
-			t.Fatalf("Failed to query status: %v", err)
-		}
-		if status.Status == string(TxStatusSucceeded) {
-			// Verify retry count
-			if callCount.Load() < 3 {
-				t.Errorf("expected at least 3 calls, got %d", callCount.Load())
-			}
-			return
-		}
-		if status.Status == string(TxStatusFailed) {
-			t.Fatalf("Transaction failed (should have succeeded after retries): %s", status.LastError)
-		}
-		time.Sleep(200 * time.Millisecond)
+	if txID == "" {
+		t.Fatal("SubmitAndWait() txID = empty, want persisted transaction id")
 	}
-	t.Fatal("Transaction did not complete in time")
+	if status == nil || status.Status != string(TxStatusSucceeded) {
+		t.Fatalf("SubmitAndWait() status = %#v, want succeeded", status)
+	}
+	// Verify retry count
+	if callCount.Load() < 3 {
+		t.Errorf("expected at least 3 calls, got %d", callCount.Load())
+	}
 }
 
 // TestPollerConcurrency tests concurrent poll task processing
