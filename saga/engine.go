@@ -6,6 +6,7 @@ package saga
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -85,6 +86,20 @@ type StepStatusView struct {
 	// LastError contains the last error message.
 	LastError string
 }
+
+var (
+	// ErrTransactionFailed indicates the transaction reached terminal failed state.
+	ErrTransactionFailed = errors.New("transaction reached terminal failed state")
+	// ErrTransactionNotFound indicates the requested transaction does not exist.
+	ErrTransactionNotFound = errors.New("transaction not found")
+	// ErrTransactionDisappeared indicates the submitted transaction can no longer be queried.
+	ErrTransactionDisappeared = errors.New("transaction disappeared during wait")
+
+	submitAndWaitPollInterval         = 500 * time.Millisecond
+	submitAndWaitQueryRetryLimit      = 3
+	submitAndWaitQueryRetryBackoff    = 500 * time.Millisecond
+	submitAndWaitQueryRetryBackoffMax = 2 * time.Second
+)
 
 // Engine is the main entry point for SAGA transactions.
 type Engine struct {
@@ -327,13 +342,14 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 }
 
 // Query retrieves the status of a SAGA transaction.
+// It returns ErrTransactionNotFound when txID does not exist.
 func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, error) {
 	tx, err := e.store.GetTransaction(ctx, txID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 	if tx == nil {
-		return nil, nil
+		return nil, fmt.Errorf("%w: %s", ErrTransactionNotFound, txID)
 	}
 
 	steps, err := e.store.GetSteps(ctx, txID)
@@ -361,6 +377,118 @@ func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, er
 		CreatedAt:   tx.CreatedAt,
 		FinishedAt:  tx.FinishedAt,
 	}, nil
+}
+
+// SubmitAndWait submits a SAGA transaction definition and waits until the
+// transaction reaches a terminal state or the caller context ends.
+//
+// The caller context controls only this call's submit-and-wait lifecycle.
+// Saga transaction timeout behavior remains driven by SagaDefinition.TimeoutSec.
+//
+// SubmitAndWait can be called safely from multiple goroutines. It observes
+// persisted transaction state, so the transaction may be advanced by this
+// engine instance or by another running engine connected to the same store.
+//
+// The returned error is:
+//   - nil when the transaction succeeds
+//   - ErrTransactionFailed when the transaction reaches terminal failed state
+//   - ErrTransactionDisappeared when a submitted transaction can no longer be queried
+//   - ctx.Err() if the caller context ends before a terminal state is observed
+//   - another error for unrecoverable query/infrastructure failures
+//
+// Sentinel errors may be wrapped; use errors.Is to test for them.
+func (e *Engine) SubmitAndWait(ctx context.Context, def *SagaDefinition) (string, *TransactionStatus, error) {
+	txID, err := e.Submit(ctx, def)
+	if err != nil {
+		return "", nil, err
+	}
+
+	status, err := e.waitForTransaction(ctx, txID)
+	return txID, status, err
+}
+
+func (e *Engine) waitForTransaction(ctx context.Context, txID string) (*TransactionStatus, error) {
+	var (
+		lastStatus    *TransactionStatus
+		queryFailures int
+		timer         *time.Timer
+	)
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	waitWithTimer := func(delay time.Duration) error {
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			stopTimer()
+			timer.Reset(delay)
+		}
+
+		select {
+		case <-ctx.Done():
+			stopTimer()
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+	defer stopTimer()
+
+	for {
+		status, err := e.Query(ctx, txID)
+		if err != nil {
+			if errors.Is(err, ErrTransactionNotFound) {
+				return lastStatus, fmt.Errorf("%w: %s", ErrTransactionDisappeared, txID)
+			}
+
+			queryFailures++
+			if queryFailures >= submitAndWaitQueryRetryLimit {
+				return lastStatus, fmt.Errorf("failed to query transaction %s after %d attempts: %w", txID, queryFailures, err)
+			}
+
+			backoff := submitAndWaitQueryRetryBackoff
+			for i := 1; i < queryFailures; i++ {
+				backoff *= 2
+				if backoff >= submitAndWaitQueryRetryBackoffMax {
+					backoff = submitAndWaitQueryRetryBackoffMax
+					break
+				}
+			}
+
+			if err := waitWithTimer(backoff); err != nil {
+				return lastStatus, err
+			}
+			continue
+		}
+
+		queryFailures = 0
+		if status == nil {
+			return lastStatus, fmt.Errorf("query returned nil status without error for transaction %s", txID)
+		}
+
+		lastStatus = status
+		switch status.Status {
+		case string(TxStatusSucceeded):
+			return status, nil
+		case string(TxStatusFailed):
+			if status.LastError != "" {
+				return status, fmt.Errorf("%w: %s", ErrTransactionFailed, status.LastError)
+			}
+			return status, ErrTransactionFailed
+		}
+
+		if err := waitWithTimer(submitAndWaitPollInterval); err != nil {
+			return lastStatus, err
+		}
+	}
 }
 
 // Store returns the underlying store for direct access.
@@ -456,6 +584,10 @@ func (e *Engine) DB() *sql.DB {
 
 	// 查询事务状态
 	status, err := engine.Query(ctx, txID)
+	if errors.Is(err, saga.ErrTransactionNotFound) {
+		fmt.Printf("Transaction %s not found\n", txID)
+		return
+	}
 	if err != nil {
 		log.Fatal(err)
 	}

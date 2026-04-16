@@ -76,11 +76,14 @@ func waitForStatus(ctx context.Context, e *Engine, txID string, timeout time.Dur
 	for {
 		select {
 		case <-deadline:
-			st, _ := e.Query(ctx, txID)
+			st, err := e.Query(ctx, txID)
+			if err != nil {
+				return nil, fmt.Errorf("timeout waiting for status %v; final query failed: %w", targets, err)
+			}
 			if st != nil {
 				return st, fmt.Errorf("timeout waiting for status %v; current=%s", targets, st.Status)
 			}
-			return nil, fmt.Errorf("timeout waiting for status %v; query returned nil", targets)
+			return nil, fmt.Errorf("timeout waiting for status %v; query returned nil status without error", targets)
 		case <-tick.C:
 			st, err := e.Query(ctx, txID)
 			if err != nil {

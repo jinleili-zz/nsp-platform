@@ -69,7 +69,12 @@ func NewEngine(cfg *Config) (*Engine, error)
 func (e *Engine) Start(ctx context.Context) error
 func (e *Engine) Stop() error
 func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error)
+func (e *Engine) SubmitAndWait(ctx context.Context, def *SagaDefinition) (string, *TransactionStatus, error)
 func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, error)
+
+var ErrTransactionFailed error
+var ErrTransactionNotFound error
+var ErrTransactionDisappeared error
 
 // SagaBuilder 构建器
 func NewSaga(name string) *SagaBuilder
@@ -128,6 +133,24 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 ---
 
 ## 快速使用
+
+### 可运行示例
+
+仓库内提供了一个可直接运行的 saga 示例：
+
+- `examples/saga-demo/main.go`：同一个 demo 中同时演示 `Submit` + `Query` 轮询，以及 `SubmitAndWait` 阻塞等待终态
+
+运行方式：
+
+```bash
+SAGA_EXAMPLE_DSN="$SAGA_EXAMPLE_DSN" go run ./examples/saga-demo
+```
+
+说明：
+
+- 示例会优先读取 `SAGA_EXAMPLE_DSN`，未设置时回退读取 `TEST_DSN`
+- 示例启动时会自动尝试执行 `saga/migrations/saga.sql`
+- 示例内部自带本地 HTTP demo 服务，不需要额外准备业务服务 URL
 
 ### 观测工具（第一期）
 
@@ -314,12 +337,12 @@ func deviceConfigTransaction(engine *saga.Engine, ctx context.Context) (string, 
 ```go
 func queryTransaction(engine *saga.Engine, ctx context.Context, txID string) {
     status, err := engine.Query(ctx, txID)
-    if err != nil {
-        logger.ErrorContext(ctx, "查询事务失败", logger.FieldError, err)
+    if errors.Is(err, saga.ErrTransactionNotFound) {
+        logger.WarnContext(ctx, "事务不存在", "tx_id", txID)
         return
     }
-    if status == nil {
-        logger.WarnContext(ctx, "事务不存在", "tx_id", txID)
+    if err != nil {
+        logger.ErrorContext(ctx, "查询事务失败", logger.FieldError, err)
         return
     }
 
@@ -346,6 +369,47 @@ func queryTransaction(engine *saga.Engine, ctx context.Context, txID string) {
     }
 }
 ```
+
+### 阻塞等待终态
+
+```go
+func submitAndWait(engine *saga.Engine, ctx context.Context, def *saga.SagaDefinition) error {
+    txID, status, err := engine.SubmitAndWait(ctx, def)
+    if errors.Is(err, saga.ErrTransactionFailed) {
+        logger.WarnContext(ctx, "事务最终失败",
+            "tx_id", txID,
+            "status", status.Status,
+            "last_error", status.LastError,
+        )
+        return err
+    }
+    if errors.Is(err, saga.ErrTransactionDisappeared) {
+        logger.ErrorContext(ctx, "事务在等待期间消失",
+            "tx_id", txID,
+            logger.FieldError, err,
+        )
+        return err
+    }
+    if err != nil {
+        return err
+    }
+
+    logger.InfoContext(ctx, "事务执行成功", "tx_id", txID, "status", status.Status)
+    return nil
+}
+```
+
+说明：
+
+- `Submit` 适合“先提交、后观测”的异步接入方式，返回成功只表示事务已入库。
+- `SubmitAndWait` 适合调用方需要当前请求直接拿到最终结果的场景。
+- `Query` 在事务不存在时返回 `ErrTransactionNotFound`；调用方应使用 `errors.Is(err, saga.ErrTransactionNotFound)` 判断。
+- `SubmitAndWait` 只控制当前调用的提交与等待生命周期；事务自身超时仍由 `WithTimeout` / `TimeoutSec` 决定。
+- `ErrTransactionFailed`、`ErrTransactionNotFound` 与 `ErrTransactionDisappeared` 可能被包装，调用方应使用 `errors.Is` 判断。
+- 当 `SubmitAndWait` 因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误时，`status` 只保证是“最后一次已知状态”，可能为 `nil`；调用方在读取 `status.Status` 前应先判空。
+- `SubmitAndWait` 可被多个 goroutine 并发安全调用。
+- `SubmitAndWait` 依赖至少一个连接同一存储的运行中 engine 实例推进事务，不要求必须由当前实例执行。
+- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；若存在活跃执行者且事务配置了超时，`timeoutScanner` 仍可能在超时后推进补偿路径。
 
 ---
 
