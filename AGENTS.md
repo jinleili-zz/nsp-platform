@@ -63,6 +63,7 @@ saga/
   executor_auth_test.go
 
 examples/
+  saga-demo/
   server/
   testclient/
 ```
@@ -220,6 +221,7 @@ examples/
 - `(*Engine).Store`
 - `(*Engine).DB`
 - `ErrTransactionFailed`
+- `ErrTransactionNotFound`
 - `ErrTransactionDisappeared`
 - `TransactionStatus`
 - `StepStatusView`
@@ -246,9 +248,10 @@ examples/
 - `Config` 还包含可选 `Logger logger.Logger`；未显式注入时，`saga` 运行时日志默认走 `logger.Platform()`，并在后台协调/轮询路径上优先从事务 payload 的 `_trace_id`、`_span_id` 重建 trace 上下文
 - `Step` 当前包含 `AuthAK string` 字段；当非空时，执行器会通过 `CredentialStore` 查凭证并对请求进行 `NSP-HMAC-SHA256` 签名
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
+- `Engine.Query` 当前在事务不存在时返回可被 `errors.Is(err, saga.ErrTransactionNotFound)` 识别的错误
 - `SubmitAndWait` 只控制当前调用的提交与等待生命周期；Saga 事务自身超时仍由 `SagaBuilder.WithTimeout` / `SagaDefinition.TimeoutSec` 决定
-- `SubmitAndWait` 通过轮询 `Query` 等待终态：成功时返回 `nil` error，事务终态失败时返回可被 `errors.Is(err, saga.ErrTransactionFailed)` 识别的错误，提交后事务消失时返回可被 `errors.Is(err, saga.ErrTransactionDisappeared)` 识别的错误
-- `SubmitAndWait` 的两个哨兵错误可能被包装；调用方应使用 `errors.Is` 判断，不要用 `==`
+- `SubmitAndWait` 通过轮询 `Query` 等待终态：成功时返回 `nil` error，事务终态失败时返回可被 `errors.Is(err, saga.ErrTransactionFailed)` 识别的错误，等待期间若 `Query` 返回 `ErrTransactionNotFound` 则转换为可被 `errors.Is(err, saga.ErrTransactionDisappeared)` 识别的错误
+- `ErrTransactionFailed`、`ErrTransactionNotFound`、`ErrTransactionDisappeared` 这些哨兵错误都可能被包装；调用方应使用 `errors.Is` 判断，不要用 `==`
 - `SubmitAndWait` 若因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误，`status` 仅表示最后一次已知状态，可能为 `nil`
 - `SubmitAndWait` 可被多个 goroutine 并发安全调用；它依赖同一存储上至少一个运行中的 engine 实例推进事务，不要求必须由当前实例执行
 - `SagaBuilder` 除 `AddStep` 外，还支持 `WithTimeout` 和 `WithPayload`
@@ -301,8 +304,13 @@ examples/
 
 当前示例服务位于：
 
+- `examples/saga-demo`
 - `examples/server`
 - `examples/testclient`
+
+其中：
+
+- `examples/saga-demo/main.go` 当前演示 `saga.Engine.Submit` 直接返回后配合 `Query` 轮询，以及 `SubmitAndWait` 阻塞等待终态两种接入方式；PostgreSQL 连接串通过 `SAGA_EXAMPLE_DSN`（或回退 `TEST_DSN`）传入
 
 `examples/server/main.go` 中当前中间件顺序为：
 

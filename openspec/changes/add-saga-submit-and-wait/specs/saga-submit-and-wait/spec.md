@@ -6,7 +6,7 @@
 #### Scenario: 事务提交阶段失败
 - **WHEN** `Submit` 本身因定义校验、数据库写入或凭证校验失败而返回错误
 - **THEN** `SubmitAndWait` MUST 返回空 `txID` 和 `nil` `TransactionStatus`
-- **THEN** 返回的错误 MUST 为 `Submit` 的原始错误，而不是 `ErrTransactionFailed` 或 `ErrTransactionDisappeared`
+- **THEN** 返回的错误 MUST 为 `Submit` 的原始错误，而不是 `ErrTransactionFailed`、`ErrTransactionNotFound` 或 `ErrTransactionDisappeared`
 
 #### Scenario: 同步步骤事务成功后返回终态
 - **WHEN** 调用方使用 `SubmitAndWait` 提交仅包含同步步骤且最终成功的事务
@@ -35,17 +35,25 @@
 - **THEN** 若方法已观测到事务状态，返回值 SHOULD 包含最近一次成功查询到的事务状态概览
 
 #### Scenario: 已提交事务在等待期间消失
-- **WHEN** `Submit` 已成功返回 `txID`，但 `SubmitAndWait` 后续 `Query` 返回不存在该事务
+- **WHEN** `Submit` 已成功返回 `txID`，但 `SubmitAndWait` 后续 `Query` 返回 `ErrTransactionNotFound`
 - **THEN** 方法 MUST 返回可与基础设施错误区分的事务消失错误
 - **THEN** 方法 MUST NOT 以空状态或成功结果静默返回
 
 ### Requirement: SubmitAndWait 必须定义等待期间的 Query 异常语义
-`SubmitAndWait` MUST 对等待期间的 `Query` 异常给出确定行为。对于普通 `Query` 错误，方法 MUST 采用有限重试或退避策略；若错误持续存在到超过实现定义的阈值或 `ctx` 结束，则 MUST 返回基础设施错误。对于 `Query` 返回空事务的情况，方法 MUST 将其视为事务消失异常而不是成功。
+`SubmitAndWait` MUST 对等待期间的 `Query` 异常给出确定行为。对于普通 `Query` 错误，方法 MUST 采用有限重试或退避策略；若错误持续存在到超过实现定义的阈值或 `ctx` 结束，则 MUST 返回基础设施错误。对于 `Query` 返回 `ErrTransactionNotFound` 的情况，方法 MUST 将其视为事务消失异常而不是成功。
 
 #### Scenario: 等待期间出现暂时性 Query 错误
 - **WHEN** `SubmitAndWait` 在等待终态期间遇到暂时性的 `Query` 错误，且后续查询恢复正常
 - **THEN** 方法 MUST 继续等待，而不是立即把该事务判定为失败
 - **THEN** 若事务随后达到终态，方法 MUST 按终态语义返回
+
+### Requirement: Query 必须显式区分事务不存在
+`Query` MUST 在事务不存在时返回可识别的 `ErrTransactionNotFound`，而不是以 `nil` 状态和 `nil` 错误表达“未找到”。
+
+#### Scenario: 查询一个不存在的事务
+- **WHEN** 调用方对不存在的 `txID` 调用 `Query`
+- **THEN** 方法 MUST 返回 `nil` `TransactionStatus`
+- **THEN** 返回的错误 MUST 可被 `errors.Is(err, saga.ErrTransactionNotFound)` 识别
 
 #### Scenario: 等待期间 Query 持续失败
 - **WHEN** `SubmitAndWait` 在等待终态期间持续遇到 `Query` 错误，直到超过实现定义的重试阈值且 `ctx` 仍有效

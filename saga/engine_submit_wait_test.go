@@ -42,6 +42,7 @@ func (s *submitAndWaitStore) GetSteps(ctx context.Context, txID string) ([]*Step
 	return s.steps, nil
 }
 
+// setSubmitAndWaitTestIntervals mutates package-level timing knobs and is not safe for parallel tests.
 func setSubmitAndWaitTestIntervals(t *testing.T, pollInterval, retryBackoff, retryBackoffMax time.Duration, retryLimit int) {
 	t.Helper()
 
@@ -81,6 +82,23 @@ func TestSubmitAndWaitSubmitFailure(t *testing.T) {
 	}
 	if errors.Is(err, ErrTransactionDisappeared) {
 		t.Fatal("SubmitAndWait() error wrapped ErrTransactionDisappeared, want original submit error")
+	}
+}
+
+func TestQueryTransactionNotFound(t *testing.T) {
+	store := &submitAndWaitStore{
+		txResults: []waitQueryResult{
+			{tx: nil, err: nil},
+		},
+	}
+	engine := &Engine{store: store}
+
+	status, err := engine.Query(context.Background(), "missing-tx")
+	if !errors.Is(err, ErrTransactionNotFound) {
+		t.Fatalf("Query() error = %v, want ErrTransactionNotFound", err)
+	}
+	if status != nil {
+		t.Fatalf("Query() status = %#v, want nil", status)
 	}
 }
 
@@ -157,31 +175,30 @@ func TestWaitForTransactionDisappearedTransaction(t *testing.T) {
 	}
 }
 
-func TestWaitForTransactionRetriesInitialNilResult(t *testing.T) {
+func TestWaitForTransactionInitialNotFoundReturnsDisappeared(t *testing.T) {
 	setSubmitAndWaitTestIntervals(t, 5*time.Millisecond, 5*time.Millisecond, 20*time.Millisecond, 3)
 
 	store := &submitAndWaitStore{
 		txResults: []waitQueryResult{
 			{tx: nil, err: nil},
 			{tx: &Transaction{ID: "tx-4", Status: TxStatusPending, CreatedAt: time.Now()}},
-			{tx: &Transaction{ID: "tx-4", Status: TxStatusSucceeded, CreatedAt: time.Now()}},
-		},
-		steps: []*Step{
-			{Index: 0, Name: "step-1", Status: StepStatusSucceeded},
 		},
 	}
 	engine := &Engine{store: store}
 
 	status, err := engine.waitForTransaction(context.Background(), "tx-4")
-	if err != nil {
-		t.Fatalf("waitForTransaction() error = %v, want nil", err)
+	if !errors.Is(err, ErrTransactionDisappeared) {
+		t.Fatalf("waitForTransaction() error = %v, want ErrTransactionDisappeared", err)
 	}
-	if status == nil || status.Status != string(TxStatusSucceeded) {
-		t.Fatalf("waitForTransaction() status = %#v, want succeeded", status)
+	if status != nil {
+		t.Fatalf("waitForTransaction() status = %#v, want nil", status)
+	}
+	if store.getTxCall != 1 {
+		t.Fatalf("waitForTransaction() queried %d times, want 1", store.getTxCall)
 	}
 }
 
-func TestSubmitAndWaitNoActiveExecutorReturnsContextError(t *testing.T) {
+func TestSubmitAndWaitWithoutStartReturnsContextError(t *testing.T) {
 	db := setupTestDB(t)
 	db.Close()
 

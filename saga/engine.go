@@ -90,6 +90,8 @@ type StepStatusView struct {
 var (
 	// ErrTransactionFailed indicates the transaction reached terminal failed state.
 	ErrTransactionFailed = errors.New("transaction reached terminal failed state")
+	// ErrTransactionNotFound indicates the requested transaction does not exist.
+	ErrTransactionNotFound = errors.New("transaction not found")
 	// ErrTransactionDisappeared indicates the submitted transaction can no longer be queried.
 	ErrTransactionDisappeared = errors.New("transaction disappeared during wait")
 
@@ -340,13 +342,14 @@ func (e *Engine) Submit(ctx context.Context, def *SagaDefinition) (string, error
 }
 
 // Query retrieves the status of a SAGA transaction.
+// It returns ErrTransactionNotFound when txID does not exist.
 func (e *Engine) Query(ctx context.Context, txID string) (*TransactionStatus, error) {
 	tx, err := e.store.GetTransaction(ctx, txID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 	if tx == nil {
-		return nil, nil
+		return nil, fmt.Errorf("%w: %s", ErrTransactionNotFound, txID)
 	}
 
 	steps, err := e.store.GetSteps(ctx, txID)
@@ -442,6 +445,10 @@ func (e *Engine) waitForTransaction(ctx context.Context, txID string) (*Transact
 	for {
 		status, err := e.Query(ctx, txID)
 		if err != nil {
+			if errors.Is(err, ErrTransactionNotFound) {
+				return lastStatus, fmt.Errorf("%w: %s", ErrTransactionDisappeared, txID)
+			}
+
 			queryFailures++
 			if queryFailures >= submitAndWaitQueryRetryLimit {
 				return lastStatus, fmt.Errorf("failed to query transaction %s after %d attempts: %w", txID, queryFailures, err)
@@ -464,13 +471,7 @@ func (e *Engine) waitForTransaction(ctx context.Context, txID string) (*Transact
 
 		queryFailures = 0
 		if status == nil {
-			if lastStatus == nil {
-				if err := waitWithTimer(submitAndWaitQueryRetryBackoff); err != nil {
-					return lastStatus, err
-				}
-				continue
-			}
-			return lastStatus, fmt.Errorf("%w: %s", ErrTransactionDisappeared, txID)
+			return lastStatus, fmt.Errorf("query returned nil status without error for transaction %s", txID)
 		}
 
 		lastStatus = status
@@ -583,6 +584,10 @@ func (e *Engine) DB() *sql.DB {
 
 	// 查询事务状态
 	status, err := engine.Query(ctx, txID)
+	if errors.Is(err, saga.ErrTransactionNotFound) {
+		fmt.Printf("Transaction %s not found\n", txID)
+		return
+	}
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -58,8 +58,9 @@
 
 `func (e *Engine) SubmitAndWait(ctx context.Context, def *SagaDefinition) (string, *TransactionStatus, error)`
 
-并导出至少两个哨兵错误：
+并导出三个可识别错误：
 - `ErrTransactionFailed`：事务已进入最终 `failed`。
+- `ErrTransactionNotFound`：调用方显式查询一个不存在的事务。
 - `ErrTransactionDisappeared`：`Submit` 已成功返回后，后续等待查询发现事务不存在。
 
 返回约定：
@@ -82,7 +83,7 @@
 
 等待循环不能对 `Query` 的非终态错误保持未定义状态。实现将区分两类异常：
 - `Query` 返回普通错误：视为读路径基础设施异常。实现 SHOULD 使用有限次数的指数退避重试；推荐默认值为连续失败达到 3 次后返回错误，退避从 500ms 开始并封顶到 2s。
-- `Query` 返回 `nil, nil`：在 `Submit` 已成功返回后，这代表事务在等待期间异常消失。实现 MUST 将其视为 `ErrTransactionDisappeared` 并结束等待，不得静默返回空状态成功。
+- `Query` 返回 `ErrTransactionNotFound`：对于直接调用 `Query` 的调用方，这代表事务不存在；在 `Submit` 已成功返回后的等待循环中，这代表事务在等待期间异常消失。实现 MUST 将其视为 `ErrTransactionDisappeared` 并结束等待，不得静默返回空状态成功。
 
 选择这个方案的原因：
 - 避免把短暂数据库抖动直接误判为 saga 失败。
@@ -130,7 +131,7 @@
 
 - [等待期间增加查询压力] → 以 500ms 作为默认基准间隔；每个等待者约每秒触发 2 次 `Query`，当前 `Query` 约对应 4 次底层 SQL 读取；保留包内可覆盖间隔以优化测试；后续若有性能证据再考虑配置化或事件化优化。
 - [调用方误把 `ctx` 当作 saga 事务超时] → 在文档、注释和测试名称中明确 `ctx` 与 `WithTimeout` 的职责边界。
-- [最终失败或事务消失语义不清] → 导出 `ErrTransactionFailed` 和 `ErrTransactionDisappeared`，并通过返回状态同时表达，避免把业务失败或数据不一致混同为基础设施错误。
+- [最终失败、显式未找到或事务消失语义不清] → 导出 `ErrTransactionFailed`、`ErrTransactionNotFound` 和 `ErrTransactionDisappeared`，并通过返回状态同时表达，避免把业务失败或数据不一致混同为基础设施错误。
 - [查询链路临时异常导致等待不稳定] → 定义 3 次连续失败阈值和指数退避策略，并为持续失败保留显式返回路径。
 - [没有活跃执行者或本地入队失败时调用方误以为方法卡死] → 在 godoc 和文档中明确依赖活跃执行者推进事务，并覆盖 `pending` 长时间不推进时由 `ctx` 结束返回的测试。
 
