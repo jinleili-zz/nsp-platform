@@ -299,7 +299,9 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 			NextPollAt:    nextPollAt,
 		}
 
-		if err := e.store.CreatePollTask(ctx, pollTask); err != nil {
+		writeCtx, writeCancel := durableStoreContext(ctx)
+		defer writeCancel()
+		if err := e.store.CreatePollTask(writeCtx, pollTask); err != nil {
 			return fmt.Errorf("failed to create poll task: %w", err)
 		}
 

@@ -29,6 +29,9 @@ type regressionStore struct {
 	steps     map[string]*Step
 	stepOrder map[string][]*Step
 	pollTasks map[string]*PollTask
+
+	getStepHook        func(ctx context.Context, stepID string, step *Step) (*Step, error)
+	createPollTaskHook func(ctx context.Context, task *PollTask) error
 }
 
 func newRegressionStore() *regressionStore {
@@ -140,8 +143,14 @@ func (s *regressionStore) GetSteps(ctx context.Context, txID string) ([]*Step, e
 
 func (s *regressionStore) GetStep(ctx context.Context, stepID string) (*Step, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return cloneStep(s.steps[stepID]), nil
+	step := cloneStep(s.steps[stepID])
+	hook := s.getStepHook
+	s.mu.Unlock()
+
+	if hook != nil {
+		return hook(ctx, stepID, step)
+	}
+	return step, nil
 }
 
 func (s *regressionStore) UpdateStepStatus(ctx context.Context, stepID string, status StepStatus, lastError string) error {
@@ -194,6 +203,12 @@ func (s *regressionStore) IncrementStepPollCount(ctx context.Context, stepID str
 }
 
 func (s *regressionStore) CreatePollTask(ctx context.Context, task *PollTask) error {
+	if s.createPollTaskHook != nil {
+		if err := s.createPollTaskHook(ctx, task); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := *task
@@ -397,6 +412,119 @@ func TestCoordinatorExecuteCompensationRetriesStepLeftCompensating(t *testing.T)
 	updatedTx, _ := store.GetTransaction(context.Background(), tx.ID)
 	if updatedTx.Status != TxStatusFailed {
 		t.Fatalf("expected transaction status %q after compensation, got %q", TxStatusFailed, updatedTx.Status)
+	}
+}
+
+func TestCoordinatorExecuteAsyncStepTimeoutAfterSubmitCompensatesPollingStep(t *testing.T) {
+	store := newRegressionStore()
+	timeoutAt := time.Now().Add(20 * time.Millisecond)
+	tx := &Transaction{ID: "tx-async-timeout-submit", Status: TxStatusRunning, TimeoutAt: &timeoutAt}
+
+	step := &Step{
+		ID:               "step-async-timeout-submit",
+		TransactionID:    tx.ID,
+		Index:            0,
+		Name:             "async-step",
+		Type:             StepTypeAsync,
+		Status:           StepStatusPending,
+		ActionMethod:     http.MethodPost,
+		ActionURL:        "http://unit.test/async",
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+		PollIntervalSec:  1,
+		PollMaxTimes:     3,
+		MaxRetry:         1,
+	}
+	store.createPollTaskHook = func(ctx context.Context, task *PollTask) error {
+		time.Sleep(40 * time.Millisecond)
+		return ctx.Err()
+	}
+	store.put(tx, step)
+
+	var compensateCalls atomic.Int32
+	coordinator := NewCoordinator(store, newExecutorWithResponder(store, func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/async":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"task_id":"TASK-123"}`)),
+				Header:     make(http.Header),
+			}, nil
+		case "/compensate":
+			compensateCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("missing")),
+				Header:     make(http.Header),
+			}, nil
+		}
+	}), nil, &CoordinatorConfig{})
+
+	if !coordinator.executeAsyncStep(context.Background(), tx, step, []*Step{step}) {
+		t.Fatal("expected coordinator to continue driving after async timeout")
+	}
+
+	updatedTx, _ := store.GetTransaction(context.Background(), tx.ID)
+	if updatedTx.Status != TxStatusCompensating {
+		t.Fatalf("expected transaction status %q, got %q", TxStatusCompensating, updatedTx.Status)
+	}
+
+	updatedStep, _ := store.GetStep(context.Background(), step.ID)
+	if updatedStep.Status != StepStatusPolling {
+		t.Fatalf("expected step status %q before compensation, got %q", StepStatusPolling, updatedStep.Status)
+	}
+
+	steps, _ := store.GetSteps(context.Background(), tx.ID)
+	coordinator.executeCompensation(context.Background(), updatedTx, steps)
+
+	compensatedStep, _ := store.GetStep(context.Background(), step.ID)
+	if compensatedStep.Status != StepStatusCompensated {
+		t.Fatalf("expected polling step to be compensated, got %q", compensatedStep.Status)
+	}
+	if compensateCalls.Load() != 1 {
+		t.Fatalf("expected exactly one compensation attempt, got %d", compensateCalls.Load())
+	}
+}
+
+func TestCoordinatorWaitForAsyncStepReloadTimeoutTriggersCompensation(t *testing.T) {
+	store := newRegressionStore()
+	timeoutAt := time.Now().Add(20 * time.Millisecond)
+	tx := &Transaction{ID: "tx-async-reload-timeout", Status: TxStatusRunning, TimeoutAt: &timeoutAt}
+	step := &Step{
+		ID:               "step-async-reload-timeout",
+		TransactionID:    tx.ID,
+		Index:            0,
+		Name:             "poll-step",
+		Type:             StepTypeAsync,
+		Status:           StepStatusPolling,
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+	}
+	store.getStepHook = func(ctx context.Context, stepID string, step *Step) (*Step, error) {
+		time.Sleep(40 * time.Millisecond)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return step, nil
+	}
+	store.put(tx, step)
+
+	poller := NewPoller(store, nil, &PollerConfig{})
+	coordinator := NewCoordinator(store, nil, poller, &CoordinatorConfig{AsyncStepTimeout: time.Second})
+
+	if !coordinator.waitForAsyncStep(context.Background(), tx, &Step{ID: step.ID, Index: 0, Status: StepStatusPolling}, []*Step{step}) {
+		t.Fatal("expected waitForAsyncStep to continue driving after transaction timeout")
+	}
+
+	updatedTx, _ := store.GetTransaction(context.Background(), tx.ID)
+	if updatedTx.Status != TxStatusCompensating {
+		t.Fatalf("expected transaction status %q, got %q", TxStatusCompensating, updatedTx.Status)
 	}
 }
 

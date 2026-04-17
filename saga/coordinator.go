@@ -570,7 +570,7 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 
 	// Re-read the latest step state after registering so a poll result that
 	// arrived before channel registration does not strand the coordinator.
-	latestStep, err := c.store.GetStep(txCtx, step.ID)
+	latestStep, err := c.store.GetStep(ctx, step.ID)
 	if err != nil {
 		c.log.ErrorContext(ctx, "failed to reload async step state",
 			appendStepLogFields(appendTransactionLogFields([]any{
@@ -678,14 +678,15 @@ func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, 
 	}
 }
 
-// executeCompensation executes compensation for all completed steps in reverse order.
+// executeCompensation executes compensation for all compensatable steps in reverse order.
 func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, steps []*Step) {
-	// Find all steps that need compensation. A step left in compensating after a
-	// crash must be retried during recovery, not skipped.
+	// Find all steps that need compensation. Async steps that already reached the
+	// polling phase have submitted their forward action and must also be rolled
+	// back on timeout-triggered compensation.
 	var toCompensate []*Step
 	for i := len(steps) - 1; i >= 0; i-- {
 		step := steps[i]
-		if step.Status == StepStatusSucceeded || step.Status == StepStatusCompensating {
+		if step.Status == StepStatusSucceeded || step.Status == StepStatusPolling || step.Status == StepStatusCompensating {
 			toCompensate = append(toCompensate, step)
 		}
 	}
