@@ -389,11 +389,12 @@ log.Printf("事务成功 txID=%s status=%s", txID, status.Status)
 - `SubmitAndWait` 适合当前请求必须拿到最终结果的场景。
 - `Query` 在事务不存在时返回 `ErrTransactionNotFound`；调用方应使用 `errors.Is(err, saga.ErrTransactionNotFound)` 判断。
 - `SubmitAndWait` 只控制当前调用的等待生命周期；事务自身超时仍由 `WithTimeout` 控制。
+- 当事务进入 `running` 后，同步步骤出站请求和异步步骤等待都会感知事务级超时；到达事务 deadline 时会优先在当前执行路径内切换到补偿流程。
 - `ErrTransactionFailed`、`ErrTransactionNotFound` 与 `ErrTransactionDisappeared` 可能被包装，调用方应使用 `errors.Is` 判断。
 - 当 `SubmitAndWait` 因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误时，`status` 只保证是最后一次已知状态，可能为 `nil`；读取 `status.Status` 前应先判空。
 - `SubmitAndWait` 可被多个 goroutine 并发安全调用。
 - `SubmitAndWait` 依赖至少一个连接同一存储的运行中 engine 实例推进事务，不要求必须由当前实例执行。
-- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；若存在活跃执行者且事务配置了超时，`timeoutScanner` 仍可能在超时后推进补偿路径。
+- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；`timeoutScanner` 主要负责兜底处理未被活跃执行者接手、或实例崩溃后遗留的超时事务。
 
 ### 6. 查询事务状态
 
@@ -480,8 +481,8 @@ PollSuccessValue: "success"
 | `PollBatchSize` | int | 20 | 每次轮询扫描的任务数 |
 | `PollScanInterval` | Duration | 3s | 轮询扫描间隔 |
 | `CoordScanInterval` | Duration | 5s | 协调器扫描间隔 |
-| `HTTPTimeout` | Duration | 30s | HTTP 请求超时时间 |
-| `HTTPClient` | `*http.Client` | nil | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
+| `HTTPTimeout` | Duration | 30s | 单次 HTTP 请求超时时间；若事务 deadline 更早，前向步骤会先受事务级超时约束 |
+| `HTTPClient` | `*http.Client` | nil | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout`，但事务级超时仍会通过 request context 生效 |
 | `InstanceID` | string | auto | 实例 ID (自动生成: hostname-pid) |
 | `Logger` | `logger.Logger` | `logger.Platform()` | 可选，SAGA 运行时 logger；后台路径会优先从事务 payload 恢复 trace 上下文 |
 | `LeaseDuration` | Duration | 5m | 分布式锁租约时长 (Coordinator 内部配置) |
@@ -604,6 +605,7 @@ FOR UPDATE SKIP LOCKED
 1. 其持有的锁会在 `locked_until` 过期后自动释放
 2. 其他实例在下次扫描时可接管未完成事务
 3. 默认租约时长 5 分钟，可通过 `LeaseDuration` 配置
+4. 活跃事务的超时优先由当前执行路径感知并触发补偿；超时扫描主要用于接管未被活跃执行者处理的超时事务
 
 ### 5. 实例标识
 

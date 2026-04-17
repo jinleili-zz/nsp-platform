@@ -378,6 +378,11 @@ func (c *Coordinator) driveTransaction(ctx context.Context, txID string) {
 // executeNextStep finds and executes the next pending step.
 // Returns true if the loop should continue, false if it should exit.
 func (c *Coordinator) executeNextStep(ctx context.Context, tx *Transaction, steps []*Step) bool {
+	if transactionTimedOut(tx) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+		return true
+	}
+
 	// Find the first step that needs execution
 	var currentStep *Step
 	allSucceeded := true
@@ -407,6 +412,10 @@ func (c *Coordinator) executeNextStep(ctx context.Context, tx *Transaction, step
 
 	// All steps succeeded - use CAS to prevent concurrent status overwrites
 	if allSucceeded {
+		if transactionTimedOut(tx) {
+			c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+			return true
+		}
 		ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusSucceeded, "")
 		if err != nil {
 			c.log.ErrorContext(ctx, "failed to mark transaction as succeeded",
@@ -464,16 +473,36 @@ func (c *Coordinator) executeStep(ctx context.Context, tx *Transaction, step *St
 
 // executeSyncStep executes a synchronous step.
 func (c *Coordinator) executeSyncStep(ctx context.Context, tx *Transaction, step *Step, steps []*Step) bool {
-	err := c.executor.ExecuteStep(ctx, tx, step, steps)
+	if transactionTimedOut(tx) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+		return true
+	}
+
+	execCtx, cancel := withTransactionExecutionContext(ctx, tx)
+	defer cancel()
+
+	err := c.executor.ExecuteStep(execCtx, tx, step, steps)
 	if err == nil {
+		if transactionTimedOut(tx) || transactionExecutionTimedOut(execCtx) {
+			c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+			return true
+		}
+
 		// Success - update current step and continue
-		if err := c.store.UpdateTransactionStep(ctx, tx.ID, step.Index+1); err != nil {
+		writeCtx, writeCancel := durableStoreContext(ctx)
+		defer writeCancel()
+		if err := c.store.UpdateTransactionStep(writeCtx, tx.ID, step.Index+1); err != nil {
 			c.log.ErrorContext(ctx, "failed to advance transaction step",
 				appendStepLogFields(appendTransactionLogFields([]any{
 					logger.FieldError, err,
 				}, tx), step)...,
 			)
 		}
+		return true
+	}
+
+	if errors.Is(err, errTransactionExecutionTimeout) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
 		return true
 	}
 
@@ -491,10 +520,27 @@ func (c *Coordinator) executeSyncStep(ctx context.Context, tx *Transaction, step
 
 // executeAsyncStep initiates an asynchronous step.
 func (c *Coordinator) executeAsyncStep(ctx context.Context, tx *Transaction, step *Step, steps []*Step) bool {
-	err := c.executor.ExecuteAsyncStep(ctx, tx, step, steps)
+	if transactionTimedOut(tx) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+		return true
+	}
+
+	execCtx, cancel := withTransactionExecutionContext(ctx, tx)
+	defer cancel()
+
+	err := c.executor.ExecuteAsyncStep(execCtx, tx, step, steps)
 	if err == nil {
+		if transactionTimedOut(tx) || transactionExecutionTimedOut(execCtx) {
+			c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+			return true
+		}
 		// Async step submitted, wait for poll result
 		return c.waitForAsyncStep(ctx, tx, step, steps)
+	}
+
+	if errors.Is(err, errTransactionExecutionTimeout) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+		return true
 	}
 
 	// Check error type
@@ -510,6 +556,14 @@ func (c *Coordinator) executeAsyncStep(ctx context.Context, tx *Transaction, ste
 
 // waitForAsyncStep waits for an async step to complete via polling.
 func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, step *Step, steps []*Step) bool {
+	if transactionTimedOut(tx) {
+		c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+		return true
+	}
+
+	txCtx, txCancel := withTransactionExecutionContext(ctx, tx)
+	defer txCancel()
+
 	// Register for poll notifications
 	notifyCh := c.poller.RegisterNotify(tx.ID)
 	defer c.poller.UnregisterNotify(tx.ID)
@@ -531,7 +585,13 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	}
 	switch latestStep.Status {
 	case StepStatusSucceeded:
-		if err := c.store.UpdateTransactionStep(ctx, tx.ID, latestStep.Index+1); err != nil {
+		if transactionTimedOut(tx) || transactionExecutionTimedOut(txCtx) {
+			c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+			return true
+		}
+		writeCtx, writeCancel := durableStoreContext(ctx)
+		defer writeCancel()
+		if err := c.store.UpdateTransactionStep(writeCtx, tx.ID, latestStep.Index+1); err != nil {
 			c.log.ErrorContext(ctx, "failed to advance transaction step after async success",
 				appendStepLogFields(appendTransactionLogFields([]any{
 					logger.FieldError, err,
@@ -551,11 +611,15 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 	}
 
 	// Create a timeout context
-	timeoutCtx, cancel := context.WithTimeout(ctx, c.config.AsyncStepTimeout)
+	timeoutCtx, cancel := context.WithTimeout(txCtx, c.config.AsyncStepTimeout)
 	defer cancel()
 
 	select {
 	case <-timeoutCtx.Done():
+		if transactionExecutionTimedOut(timeoutCtx) || transactionTimedOut(tx) {
+			c.triggerCompensation(ctx, tx, errTransactionExecutionTimeout.Error())
+			return true // Continue loop to process compensation
+		}
 		// Timeout waiting for async step
 		c.triggerCompensation(ctx, tx, "timeout waiting for async step")
 		return true // Continue loop to process compensation
@@ -593,7 +657,10 @@ func (c *Coordinator) waitForAsyncStep(ctx context.Context, tx *Transaction, ste
 // triggerCompensation initiates the compensation process using CAS to prevent
 // concurrent status overwrites by multiple instances.
 func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, reason string) {
-	ok, err := c.store.UpdateTransactionStatusCAS(ctx, tx.ID, TxStatusRunning, TxStatusCompensating, reason)
+	writeCtx, cancel := durableStoreContext(ctx)
+	defer cancel()
+
+	ok, err := c.store.UpdateTransactionStatusCAS(writeCtx, tx.ID, TxStatusRunning, TxStatusCompensating, reason)
 	if err != nil {
 		c.log.ErrorContext(ctx, "failed to switch transaction to compensating",
 			appendTransactionLogFields([]any{
@@ -611,14 +678,15 @@ func (c *Coordinator) triggerCompensation(ctx context.Context, tx *Transaction, 
 	}
 }
 
-// executeCompensation executes compensation for all completed steps in reverse order.
+// executeCompensation executes compensation for all compensatable steps in reverse order.
 func (c *Coordinator) executeCompensation(ctx context.Context, tx *Transaction, steps []*Step) {
-	// Find all steps that need compensation. A step left in compensating after a
-	// crash must be retried during recovery, not skipped.
+	// Find all steps that need compensation. Async steps that already reached the
+	// polling phase have submitted their forward action and must also be rolled
+	// back on timeout-triggered compensation.
 	var toCompensate []*Step
 	for i := len(steps) - 1; i >= 0; i-- {
 		step := steps[i]
-		if step.Status == StepStatusSucceeded || step.Status == StepStatusCompensating {
+		if step.Status == StepStatusSucceeded || step.Status == StepStatusPolling || step.Status == StepStatusCompensating {
 			toCompensate = append(toCompensate, step)
 		}
 	}

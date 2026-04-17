@@ -79,6 +79,24 @@ func NewExecutor(store Store, cfg *ExecutorConfig, credStore auth.CredentialStor
 	}
 }
 
+func (e *Executor) updateStepStatus(ctx context.Context, stepID string, status StepStatus, lastError string) error {
+	writeCtx, cancel := durableStoreContext(ctx)
+	defer cancel()
+	return e.store.UpdateStepStatus(writeCtx, stepID, status, lastError)
+}
+
+func (e *Executor) updateStepResponse(ctx context.Context, stepID string, response map[string]any) error {
+	writeCtx, cancel := durableStoreContext(ctx)
+	defer cancel()
+	return e.store.UpdateStepResponse(writeCtx, stepID, response)
+}
+
+func (e *Executor) incrementStepRetry(ctx context.Context, stepID string) error {
+	writeCtx, cancel := durableStoreContext(ctx)
+	defer cancel()
+	return e.store.IncrementStepRetry(writeCtx, stepID)
+}
+
 // ExecuteStep executes a synchronous step's forward action.
 // Returns nil on success, ErrStepRetryable if retry is possible, ErrStepFatal if no more retries.
 func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step, allSteps []*Step) error {
@@ -131,7 +149,7 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 	}
 
 	if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
-		if updateErr := e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
+		if updateErr := e.updateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
 			return fmt.Errorf("failed to update step status after signing error: %w", updateErr)
 		}
 		step.Status = StepStatusFailed
@@ -163,11 +181,11 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 			}
 		}
 
-		if err := e.store.UpdateStepResponse(ctx, step.ID, response); err != nil {
+		if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
 			return fmt.Errorf("failed to update step response: %w", err)
 		}
 
-		if err := e.store.UpdateStepStatus(ctx, step.ID, StepStatusSucceeded, ""); err != nil {
+		if err := e.updateStepStatus(ctx, step.ID, StepStatusSucceeded, ""); err != nil {
 			return fmt.Errorf("failed to update step status to succeeded: %w", err)
 		}
 
@@ -235,7 +253,7 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 	}
 
 	if err := e.signRequestIfNeeded(ctx, step, req); err != nil {
-		if updateErr := e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
+		if updateErr := e.updateStepStatus(ctx, step.ID, StepStatusFailed, err.Error()); updateErr != nil {
 			return fmt.Errorf("failed to update step status after signing error: %w", updateErr)
 		}
 		step.Status = StepStatusFailed
@@ -266,7 +284,7 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 			}
 		}
 
-		if err := e.store.UpdateStepResponse(ctx, step.ID, response); err != nil {
+		if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
 			return fmt.Errorf("failed to update step response: %w", err)
 		}
 
@@ -281,12 +299,14 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 			NextPollAt:    nextPollAt,
 		}
 
-		if err := e.store.CreatePollTask(ctx, pollTask); err != nil {
+		writeCtx, writeCancel := durableStoreContext(ctx)
+		defer writeCancel()
+		if err := e.store.CreatePollTask(writeCtx, pollTask); err != nil {
 			return fmt.Errorf("failed to create poll task: %w", err)
 		}
 
 		// Update step status to polling
-		if err := e.store.UpdateStepStatus(ctx, step.ID, StepStatusPolling, ""); err != nil {
+		if err := e.updateStepStatus(ctx, step.ID, StepStatusPolling, ""); err != nil {
 			return fmt.Errorf("failed to update step status to polling: %w", err)
 		}
 
@@ -390,7 +410,7 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 		// Check response status
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Compensation successful
-			if err := e.store.UpdateStepStatus(ctx, step.ID, StepStatusCompensated, ""); err != nil {
+			if err := e.updateStepStatus(ctx, step.ID, StepStatusCompensated, ""); err != nil {
 				return fmt.Errorf("failed to update step status to compensated: %w", err)
 			}
 			step.Status = StepStatusCompensated
@@ -402,7 +422,7 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 
 	// All retries exhausted
 	errMsg := fmt.Sprintf("compensation failed after %d retries: %v", maxRetries, lastErr)
-	e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, errMsg)
+	_ = e.updateStepStatus(ctx, step.ID, StepStatusFailed, errMsg)
 	if lastErr != nil {
 		return fmt.Errorf("%s: %w: %w", errMsg, ErrCompensationFailed, lastErr)
 	}
@@ -411,8 +431,18 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 
 // handleHTTPError handles HTTP errors and determines if retry is possible.
 func (e *Executor) handleHTTPError(ctx context.Context, step *Step, err error) error {
+	if transactionExecutionTimedOut(ctx) {
+		timeoutErr := fmt.Errorf("%w: %v", errTransactionExecutionTimeout, err)
+		if updateErr := e.updateStepStatus(ctx, step.ID, StepStatusFailed, timeoutErr.Error()); updateErr != nil {
+			return fmt.Errorf("failed to update step status after transaction timeout: %w", updateErr)
+		}
+		step.Status = StepStatusFailed
+		step.LastError = timeoutErr.Error()
+		return timeoutErr
+	}
+
 	// Increment retry count
-	if incrementErr := e.store.IncrementStepRetry(ctx, step.ID); incrementErr != nil {
+	if incrementErr := e.incrementStepRetry(ctx, step.ID); incrementErr != nil {
 		e.log.ErrorContext(ctx, "failed to increment step retry count",
 			appendStepLogFields([]any{
 				logger.FieldError, incrementErr,
@@ -423,12 +453,14 @@ func (e *Executor) handleHTTPError(ctx context.Context, step *Step, err error) e
 
 	// Check if more retries are possible
 	if step.RetryCount < step.MaxRetry {
-		e.store.UpdateStepStatus(ctx, step.ID, StepStatusPending, err.Error())
+		_ = e.updateStepStatus(ctx, step.ID, StepStatusPending, err.Error())
 		return fmt.Errorf("%w: %v", ErrStepRetryable, err)
 	}
 
 	// No more retries
-	e.store.UpdateStepStatus(ctx, step.ID, StepStatusFailed, err.Error())
+	_ = e.updateStepStatus(ctx, step.ID, StepStatusFailed, err.Error())
+	step.Status = StepStatusFailed
+	step.LastError = err.Error()
 	return fmt.Errorf("%w: %v", ErrStepFatal, err)
 }
 
