@@ -97,8 +97,8 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 | `PollBatchSize` | `int` | `20` | 轮询器每次扫描任务数 |
 | `PollScanInterval` | `time.Duration` | `3s` | 轮询器扫描间隔 |
 | `CoordScanInterval` | `time.Duration` | `5s` | 协调器扫描间隔 |
-| `HTTPTimeout` | `time.Duration` | `30s` | HTTP 调用超时 |
-| `HTTPClient` | `*http.Client` | `nil` | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout` |
+| `HTTPTimeout` | `time.Duration` | `30s` | 单次 HTTP 调用超时时间；若事务 deadline 更早，前向步骤会先受事务级超时约束 |
+| `HTTPClient` | `*http.Client` | `nil` | 可选，自定义出站 HTTP client；非 nil 时忽略 `HTTPTimeout`，但事务级超时仍会通过 request context 生效 |
 | `InstanceID` | `string` | 自动生成 | 实例唯一标识 |
 | `CredentialStore` | `auth.CredentialStore` | `nil` | 可选，用于步骤出站 AK/SK 签名 |
 | `Logger` | `logger.Logger` | `logger.Platform()` | 可选，SAGA 运行时日志出口；未显式注入时默认走 platform logger，并在后台路径优先重建事务 trace 上下文 |
@@ -413,11 +413,12 @@ func submitAndWait(engine *saga.Engine, ctx context.Context, def *saga.SagaDefin
 - `SubmitAndWait` 适合调用方需要当前请求直接拿到最终结果的场景。
 - `Query` 在事务不存在时返回 `ErrTransactionNotFound`；调用方应使用 `errors.Is(err, saga.ErrTransactionNotFound)` 判断。
 - `SubmitAndWait` 只控制当前调用的提交与等待生命周期；事务自身超时仍由 `WithTimeout` / `TimeoutSec` 决定。
+- 当事务进入 `running` 后，同步步骤出站请求和异步步骤等待都会感知事务级超时；到达事务 deadline 时会优先在当前执行路径内切换到补偿流程。
 - `ErrTransactionFailed`、`ErrTransactionNotFound` 与 `ErrTransactionDisappeared` 可能被包装，调用方应使用 `errors.Is` 判断。
 - 当 `SubmitAndWait` 因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误时，`status` 只保证是“最后一次已知状态”，可能为 `nil`；调用方在读取 `status.Status` 前应先判空。
 - `SubmitAndWait` 可被多个 goroutine 并发安全调用。
 - `SubmitAndWait` 依赖至少一个连接同一存储的运行中 engine 实例推进事务，不要求必须由当前实例执行。
-- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；若存在活跃执行者且事务配置了超时，`timeoutScanner` 仍可能在超时后推进补偿路径。
+- 当前实现下，如果事务已持久化但未被执行者接手，事务可能长时间停留在 `pending`；`timeoutScanner` 主要负责兜底处理未被活跃执行者接手、或实例崩溃后遗留的超时事务。
 
 ---
 
@@ -503,7 +504,7 @@ CREATE TABLE saga_poll_tasks (
 
 - 步骤数量建议控制在 10 个以内
 - 异步步骤轮询间隔不宜过短（建议 >= 5s）
-- 事务超时时间根据业务实际耗时设置
+- 事务超时时间根据业务实际耗时设置；当前实现会让前向步骤请求与异步等待直接感知事务 deadline
 
 ---
 

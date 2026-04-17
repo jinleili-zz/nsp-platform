@@ -250,6 +250,7 @@ examples/
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
 - `Engine.Query` 当前在事务不存在时返回可被 `errors.Is(err, saga.ErrTransactionNotFound)` 识别的错误
 - `SubmitAndWait` 只控制当前调用的提交与等待生命周期；Saga 事务自身超时仍由 `SagaBuilder.WithTimeout` / `SagaDefinition.TimeoutSec` 决定
+- 当事务已进入 `running` 后，同步步骤出站请求和异步步骤等待都会感知事务级超时；一旦到达事务 deadline，coordinator 会优先在当前执行路径内切换到补偿流程
 - `SubmitAndWait` 通过轮询 `Query` 等待终态：成功时返回 `nil` error，事务终态失败时返回可被 `errors.Is(err, saga.ErrTransactionFailed)` 识别的错误，等待期间若 `Query` 返回 `ErrTransactionNotFound` 则转换为可被 `errors.Is(err, saga.ErrTransactionDisappeared)` 识别的错误
 - `ErrTransactionFailed`、`ErrTransactionNotFound`、`ErrTransactionDisappeared` 这些哨兵错误都可能被包装；调用方应使用 `errors.Is` 判断，不要用 `==`
 - `SubmitAndWait` 若因上下文取消、查询基础设施错误或 `ErrTransactionDisappeared` 返回错误，`status` 仅表示最后一次已知状态，可能为 `nil`
@@ -257,7 +258,7 @@ examples/
 - `SagaBuilder` 除 `AddStep` 外，还支持 `WithTimeout` 和 `WithPayload`
 - `SagaDefinition` 当前包含 `Payload map[string]any`
 - `Engine.Submit` 会将调用方 context 中的 trace 信息写入事务 payload：`_trace_id`、`_span_id`
-- 当前实现下，如果事务已持久化但 coordinator 本地入队失败，且后续没有新的恢复机会，事务可能长时间停留在 `pending`；若存在活跃执行者且配置了事务超时，`timeoutScanner` 仍可能在超时后接手推进补偿路径
+- 当前实现下，如果事务已持久化但 coordinator 本地入队失败，且后续没有新的恢复机会，事务可能长时间停留在 `pending`；`timeoutScanner` 主要用于处理未被活跃执行者接手、或实例崩溃后遗留的超时事务
 - Store 接口当前不仅包含基础 CRUD，还包含：
   - `CreateTransactionWithSteps`
   - `ClaimTransaction`
