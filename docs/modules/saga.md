@@ -130,6 +130,24 @@ func (b *SagaBuilder) Build() (*SagaDefinition, error)
 | `PollFailurePath` | `string` | 失败判断的 JSONPath |
 | `PollFailureValue` | `string` | 失败判断的期望值 |
 
+### HTTP 响应判定
+
+`saga` 当前对 `Action`、`Compensate`、`Poll` 三类 HTTP 子事务统一使用以下成功判定：
+
+- HTTP 状态码必须在 `200-299`
+- 响应体必须非空
+- 响应体必须是 JSON object
+- 顶层 `code` 字段字符串化后必须等于 `"0"`
+
+任一条件不满足都会视为该次 HTTP 调用失败。
+
+对异步步骤来说，`Poll` 还分两层语义：
+
+- 先用上述规则判断本次轮询请求是否成功
+- 轮询请求成功后，再继续用 `PollSuccessPath` / `PollFailurePath` 判断异步业务终态
+
+例如 `{"code":"0","status":"processing"}` 表示“轮询请求成功，但业务仍未完成”，步骤会继续保持 `polling`。
+
 ---
 
 ## 快速使用

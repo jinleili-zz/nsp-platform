@@ -470,6 +470,20 @@ PollSuccessPath:  "$.result.status"
 PollSuccessValue: "success"
 ```
 
+### HTTP 响应判定
+
+`saga` 对 `Action`、`Compensate`、`Poll` 三类 HTTP 子事务统一要求响应满足以下条件才视为成功：
+
+- HTTP 状态码在 `200-299`
+- 响应体非空
+- 响应体是 JSON object
+- 顶层 `code` 字段字符串化后等于 `"0"`
+
+任一条件不满足都会被视为失败。
+
+异步步骤的 `Poll` 还会继续使用 `PollSuccessPath` / `PollFailurePath` 判断业务终态。
+例如 `{"code":"0","status":"processing"}` 只表示轮询请求成功，步骤仍会保持 `polling`。
+
 ---
 
 ## 配置参数

@@ -255,15 +255,15 @@ func TestSubmitAndWaitTimeoutWaitsForCompensation(t *testing.T) {
 		switch r.URL.Path {
 		case "/step1/action":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			json.NewEncoder(w).Encode(map[string]any{"code": "0", "ok": true})
 		case "/step1/rollback":
 			compensateCalled.Add(1)
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		case "/step2/action":
 			time.Sleep(3 * time.Second)
 			w.WriteHeader(http.StatusOK)
 		case "/step2/rollback":
-			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"code": "0"})
 		default:
 			http.NotFound(w, r)
 		}

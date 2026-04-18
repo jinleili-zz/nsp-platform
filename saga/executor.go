@@ -164,41 +164,24 @@ func (e *Executor) ExecuteStep(ctx context.Context, tx *Transaction, step *Step,
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	response, err := parseHTTPResponseEnvelope(resp)
 	if err != nil {
-		return e.handleHTTPError(ctx, step, fmt.Errorf("failed to read response: %w", err))
+		return e.handleHTTPError(ctx, step, err)
 	}
 
-	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// Success - parse and store response
-		var response map[string]any
-		if len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, &response); err != nil {
-				// Try to store raw response
-				response = map[string]any{"raw": string(respBody)}
-			}
-		}
-
-		if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
-			return fmt.Errorf("failed to update step response: %w", err)
-		}
-
-		if err := e.updateStepStatus(ctx, step.ID, StepStatusSucceeded, ""); err != nil {
-			return fmt.Errorf("failed to update step status to succeeded: %w", err)
-		}
-
-		// Update step in memory for subsequent template rendering
-		step.ActionResponse = response
-		step.Status = StepStatusSucceeded
-
-		return nil
+	if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
+		return fmt.Errorf("failed to update step response: %w", err)
 	}
 
-	// Non-2xx response - handle as error
-	errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
-	return e.handleHTTPError(ctx, step, errors.New(errMsg))
+	if err := e.updateStepStatus(ctx, step.ID, StepStatusSucceeded, ""); err != nil {
+		return fmt.Errorf("failed to update step status to succeeded: %w", err)
+	}
+
+	// Update step in memory for subsequent template rendering
+	step.ActionResponse = response
+	step.Status = StepStatusSucceeded
+
+	return nil
 }
 
 // ExecuteAsyncStep executes an asynchronous step's forward action and sets up polling.
@@ -268,55 +251,39 @@ func (e *Executor) ExecuteAsyncStep(ctx context.Context, tx *Transaction, step *
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	respBody, err := io.ReadAll(resp.Body)
+	response, err := parseHTTPResponseEnvelope(resp)
 	if err != nil {
-		return e.handleHTTPError(ctx, step, fmt.Errorf("failed to read response: %w", err))
+		return e.handleHTTPError(ctx, step, err)
 	}
 
-	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		// Success - parse and store response
-		var response map[string]any
-		if len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, &response); err != nil {
-				response = map[string]any{"raw": string(respBody)}
-			}
-		}
-
-		if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
-			return fmt.Errorf("failed to update step response: %w", err)
-		}
-
-		// Update step in memory
-		step.ActionResponse = response
-
-		// Set up polling
-		nextPollAt := time.Now().Add(time.Duration(step.PollIntervalSec) * time.Second)
-		pollTask := &PollTask{
-			StepID:        step.ID,
-			TransactionID: tx.ID,
-			NextPollAt:    nextPollAt,
-		}
-
-		writeCtx, writeCancel := durableStoreContext(ctx)
-		defer writeCancel()
-		if err := e.store.CreatePollTask(writeCtx, pollTask); err != nil {
-			return fmt.Errorf("failed to create poll task: %w", err)
-		}
-
-		// Update step status to polling
-		if err := e.updateStepStatus(ctx, step.ID, StepStatusPolling, ""); err != nil {
-			return fmt.Errorf("failed to update step status to polling: %w", err)
-		}
-
-		step.Status = StepStatusPolling
-		return nil
+	if err := e.updateStepResponse(ctx, step.ID, response); err != nil {
+		return fmt.Errorf("failed to update step response: %w", err)
 	}
 
-	// Non-2xx response - handle as error
-	errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
-	return e.handleHTTPError(ctx, step, errors.New(errMsg))
+	// Update step in memory
+	step.ActionResponse = response
+
+	// Set up polling
+	nextPollAt := time.Now().Add(time.Duration(step.PollIntervalSec) * time.Second)
+	pollTask := &PollTask{
+		StepID:        step.ID,
+		TransactionID: tx.ID,
+		NextPollAt:    nextPollAt,
+	}
+
+	writeCtx, writeCancel := durableStoreContext(ctx)
+	defer writeCancel()
+	if err := e.store.CreatePollTask(writeCtx, pollTask); err != nil {
+		return fmt.Errorf("failed to create poll task: %w", err)
+	}
+
+	// Update step status to polling
+	if err := e.updateStepStatus(ctx, step.ID, StepStatusPolling, ""); err != nil {
+		return fmt.Errorf("failed to update step status to polling: %w", err)
+	}
+
+	step.Status = StepStatusPolling
+	return nil
 }
 
 // CompensateStep executes a step's compensation action.
@@ -400,24 +367,18 @@ func (e *Executor) CompensateStep(ctx context.Context, tx *Transaction, step *St
 			continue
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		// Check response status
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if _, err := parseHTTPResponseEnvelope(resp); err == nil {
+			resp.Body.Close()
 			// Compensation successful
 			if err := e.updateStepStatus(ctx, step.ID, StepStatusCompensated, ""); err != nil {
 				return fmt.Errorf("failed to update step status to compensated: %w", err)
 			}
 			step.Status = StepStatusCompensated
 			return nil
+		} else {
+			lastErr = err
 		}
-
-		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		resp.Body.Close()
 	}
 
 	// All retries exhausted
@@ -510,23 +471,45 @@ func (e *Executor) Poll(ctx context.Context, tx *Transaction, step *Step, allSte
 	}
 	defer resp.Body.Close()
 
-	// Read response body
+	return parseHTTPResponseEnvelope(resp)
+}
+
+func parseHTTPResponseEnvelope(resp *http.Response) (map[string]any, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read poll response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check response status
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("poll returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Parse response
-	var response map[string]any
-	if len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, &response); err != nil {
-			return nil, fmt.Errorf("failed to parse poll response: %w", err)
-		}
+	trimmedBody := bytes.TrimSpace(respBody)
+	if len(trimmedBody) == 0 {
+		return nil, fmt.Errorf("HTTP %d: empty response body", resp.StatusCode)
+	}
+
+	var payload any
+	if err := json.Unmarshal(trimmedBody, &payload); err != nil {
+		return nil, fmt.Errorf("HTTP %d: invalid JSON response: %w", resp.StatusCode, err)
+	}
+
+	response, ok := payload.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("HTTP %d: expected JSON object response, got %T", resp.StatusCode, payload)
+	}
+
+	codeValue, exists := response["code"]
+	if !exists {
+		return nil, fmt.Errorf("HTTP %d: response missing code field: %s", resp.StatusCode, string(trimmedBody))
+	}
+
+	code, err := jsonValueToString(codeValue)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP %d: invalid response code: %w", resp.StatusCode, err)
+	}
+	if code != "0" {
+		return nil, fmt.Errorf("HTTP %d: response code=%q: %s", resp.StatusCode, code, string(trimmedBody))
 	}
 
 	return response, nil
