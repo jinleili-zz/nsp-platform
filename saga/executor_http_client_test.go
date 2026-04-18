@@ -21,7 +21,7 @@ func TestNewExecutorUsesInjectedHTTPClient(t *testing.T) {
 	customClient := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 
@@ -58,7 +58,7 @@ func TestExecuteStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/action" {
 				t.Fatalf("expected /action request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -97,7 +97,7 @@ func TestExecuteAsyncStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/async-action" {
 				t.Fatalf("expected /async-action request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"task_id":"task-1"}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","task_id":"task-1"}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -147,7 +147,7 @@ func TestCompensateStepUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/compensate" {
 				t.Fatalf("expected /compensate request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","ok":true}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -183,7 +183,7 @@ func TestPollUsesInjectedHTTPClient(t *testing.T) {
 			if r.URL.Path != "/poll" {
 				t.Fatalf("expected /poll request, got %s", r.URL.Path)
 			}
-			return newJSONResponse(http.StatusOK, `{"status":"success"}`), nil
+			return newJSONResponse(http.StatusOK, `{"code":"0","status":"success"}`), nil
 		}),
 	}
 	executor := NewExecutor(store, &ExecutorConfig{
@@ -216,5 +216,168 @@ func TestPollUsesInjectedHTTPClient(t *testing.T) {
 	}
 	if got := resp["status"]; got != "success" {
 		t.Fatalf("expected poll status success, got %v", got)
+	}
+}
+
+func TestExecuteStepRejectsResponseWithoutCode(t *testing.T) {
+	store := newRegressionStore()
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
+	executor.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusOK, `{"ok":true}`), nil
+	})}
+
+	tx := &Transaction{ID: "tx-http-client-no-code", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-http-client-no-code",
+		TransactionID:    tx.ID,
+		Name:             "sync-step-no-code",
+		Type:             StepTypeSync,
+		Status:           StepStatusPending,
+		ActionMethod:     http.MethodPost,
+		ActionURL:        "http://unit.test/action",
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+		MaxRetry:         1,
+	}
+	store.put(tx, step)
+
+	err := executor.ExecuteStep(context.Background(), tx, step, []*Step{step})
+	if err == nil {
+		t.Fatal("expected ExecuteStep to fail when response code field is missing")
+	}
+	if step.Status != StepStatusFailed {
+		t.Fatalf("expected step status failed, got %q", step.Status)
+	}
+	if step.RetryCount != 1 {
+		t.Fatalf("expected retry count 1, got %d", step.RetryCount)
+	}
+	if !strings.Contains(step.LastError, "missing code field") {
+		t.Fatalf("expected missing code error, got %q", step.LastError)
+	}
+}
+
+func TestExecuteStepRejectsEmptyResponseBody(t *testing.T) {
+	store := newRegressionStore()
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
+	executor.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusOK, ""), nil
+	})}
+
+	tx := &Transaction{ID: "tx-http-client-empty-body", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-http-client-empty-body",
+		TransactionID:    tx.ID,
+		Name:             "sync-step-empty-body",
+		Type:             StepTypeSync,
+		Status:           StepStatusPending,
+		ActionMethod:     http.MethodPost,
+		ActionURL:        "http://unit.test/action",
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+		MaxRetry:         1,
+	}
+	store.put(tx, step)
+
+	err := executor.ExecuteStep(context.Background(), tx, step, []*Step{step})
+	if err == nil {
+		t.Fatal("expected ExecuteStep to fail on empty response body")
+	}
+	if !strings.Contains(step.LastError, "empty response body") {
+		t.Fatalf("expected empty body error, got %q", step.LastError)
+	}
+}
+
+func TestExecuteStepRejectsInvalidJSONResponse(t *testing.T) {
+	store := newRegressionStore()
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
+	executor.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusOK, `not-json`), nil
+	})}
+
+	tx := &Transaction{ID: "tx-http-client-invalid-json", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-http-client-invalid-json",
+		TransactionID:    tx.ID,
+		Name:             "sync-step-invalid-json",
+		Type:             StepTypeSync,
+		Status:           StepStatusPending,
+		ActionMethod:     http.MethodPost,
+		ActionURL:        "http://unit.test/action",
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+		MaxRetry:         1,
+	}
+	store.put(tx, step)
+
+	err := executor.ExecuteStep(context.Background(), tx, step, []*Step{step})
+	if err == nil {
+		t.Fatal("expected ExecuteStep to fail on invalid JSON response")
+	}
+	if !strings.Contains(step.LastError, "invalid JSON response") {
+		t.Fatalf("expected invalid JSON error, got %q", step.LastError)
+	}
+}
+
+func TestCompensateStepFailsWhenResponseCodeNonZero(t *testing.T) {
+	store := newRegressionStore()
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
+	executor.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusOK, `{"code":"123","message":"rollback failed"}`), nil
+	})}
+
+	tx := &Transaction{ID: "tx-http-client-comp-fail", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-http-client-comp-fail",
+		TransactionID:    tx.ID,
+		Name:             "comp-step-fail",
+		Type:             StepTypeSync,
+		Status:           StepStatusSucceeded,
+		CompensateMethod: http.MethodPost,
+		CompensateURL:    "http://unit.test/compensate",
+		MaxRetry:         1,
+	}
+	store.put(tx, step)
+
+	err := executor.CompensateStep(context.Background(), tx, step, []*Step{step})
+	if err == nil {
+		t.Fatal("expected CompensateStep to fail when response code is non-zero")
+	}
+	if !strings.Contains(err.Error(), `response code="123"`) {
+		t.Fatalf("expected response code error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), ErrCompensationFailed.Error()) {
+		t.Fatalf("expected ErrCompensationFailed in error, got %v", err)
+	}
+}
+
+func TestPollRejectsEnvelopeFailureBeforePollStatusMatch(t *testing.T) {
+	store := newRegressionStore()
+	executor := NewExecutor(store, &ExecutorConfig{HTTPTimeout: time.Second}, nil)
+	executor.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return newJSONResponse(http.StatusOK, `{"code":"123","status":"success"}`), nil
+	})}
+
+	tx := &Transaction{ID: "tx-http-client-poll-failure", Payload: map[string]any{}}
+	step := &Step{
+		ID:               "step-http-client-poll-failure",
+		TransactionID:    tx.ID,
+		Name:             "poll-step-failure",
+		Type:             StepTypeAsync,
+		Status:           StepStatusPolling,
+		PollURL:          "http://unit.test/poll",
+		PollMethod:       http.MethodGet,
+		PollSuccessPath:  "$.status",
+		PollSuccessValue: "success",
+		PollFailurePath:  "$.status",
+		PollFailureValue: "failed",
+	}
+	store.put(tx, step)
+
+	_, err := executor.Poll(context.Background(), tx, step, []*Step{step})
+	if err == nil {
+		t.Fatal("expected Poll to fail when response code is non-zero")
+	}
+	if !strings.Contains(err.Error(), `response code="123"`) {
+		t.Fatalf("expected response code error, got %v", err)
 	}
 }

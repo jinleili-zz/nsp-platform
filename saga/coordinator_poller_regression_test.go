@@ -390,7 +390,7 @@ func TestCoordinatorExecuteCompensationRetriesStepLeftCompensating(t *testing.T)
 		compensateCalls.Add(1)
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("")),
+			Body:       io.NopCloser(strings.NewReader(`{"code":"0"}`)),
 			Header:     make(http.Header),
 		}, nil
 	}), nil, &CoordinatorConfig{})
@@ -447,14 +447,14 @@ func TestCoordinatorExecuteAsyncStepTimeoutAfterSubmitCompensatesPollingStep(t *
 		case "/async":
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"task_id":"TASK-123"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"0","task_id":"TASK-123"}`)),
 				Header:     make(http.Header),
 			}, nil
 		case "/compensate":
 			compensateCalls.Add(1)
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader("")),
+				Body:       io.NopCloser(strings.NewReader(`{"code":"0"}`)),
 				Header:     make(http.Header),
 			}, nil
 		default:

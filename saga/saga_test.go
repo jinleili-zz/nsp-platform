@@ -59,6 +59,19 @@ func cleanupTables(t *testing.T, db *sql.DB) {
 	}
 }
 
+func writeSuccessEnvelope(t *testing.T, w http.ResponseWriter, payload map[string]any) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	body := map[string]any{"code": "0"}
+	for k, v := range payload {
+		body[k] = v
+	}
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Fatalf("failed to write success envelope: %v", err)
+	}
+}
+
 // TestTemplateRendering tests the template rendering functionality
 func TestTemplateRendering(t *testing.T) {
 	data := map[string]any{
@@ -355,13 +368,13 @@ func TestFullSyncTransaction(t *testing.T) {
 		switch r.URL.Path {
 		case "/step1/action":
 			step1Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step1_id": "S1-001"})
+			writeSuccessEnvelope(t, w, map[string]any{"step1_id": "S1-001"})
 		case "/step2/action":
 			step2Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step2_id": "S2-001"})
+			writeSuccessEnvelope(t, w, map[string]any{"step2_id": "S2-001"})
 		case "/step1/compensate":
 			comp1Called.Add(1)
-			w.WriteHeader(http.StatusOK)
+			writeSuccessEnvelope(t, w, nil)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -441,7 +454,7 @@ func TestSyncStepFailureCompensation(t *testing.T) {
 		switch r.URL.Path {
 		case "/step1/action":
 			step1Called.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"step1_id": "S1-001"})
+			writeSuccessEnvelope(t, w, map[string]any{"step1_id": "S1-001"})
 		case "/step2/action":
 			step2Called.Add(1)
 			// Return error
@@ -449,7 +462,7 @@ func TestSyncStepFailureCompensation(t *testing.T) {
 			w.Write([]byte("step2 failed"))
 		case "/step1/compensate":
 			comp1Called.Add(1)
-			w.WriteHeader(http.StatusOK)
+			writeSuccessEnvelope(t, w, nil)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -526,17 +539,17 @@ func TestAsyncStepPollingSuccess(t *testing.T) {
 		switch r.URL.Path {
 		case "/async/action":
 			actionCalled.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-001"})
+			writeSuccessEnvelope(t, w, map[string]any{"task_id": "TASK-001"})
 		case "/async/status":
 			count := pollCount.Add(1)
 			if count >= 3 {
 				// Return success after 3 polls
-				json.NewEncoder(w).Encode(map[string]any{"status": "success"})
+				writeSuccessEnvelope(t, w, map[string]any{"status": "success"})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+				writeSuccessEnvelope(t, w, map[string]any{"status": "pending"})
 			}
 		case "/async/compensate":
-			w.WriteHeader(http.StatusOK)
+			writeSuccessEnvelope(t, w, nil)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -610,18 +623,18 @@ func TestAsyncStepPollingFailure(t *testing.T) {
 		switch r.URL.Path {
 		case "/async/action":
 			actionCalled.Add(1)
-			json.NewEncoder(w).Encode(map[string]any{"task_id": "TASK-001"})
+			writeSuccessEnvelope(t, w, map[string]any{"task_id": "TASK-001"})
 		case "/async/status":
 			count := pollCount.Add(1)
 			if count >= 2 {
 				// Return failure
-				json.NewEncoder(w).Encode(map[string]any{"status": "failed"})
+				writeSuccessEnvelope(t, w, map[string]any{"status": "failed"})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+				writeSuccessEnvelope(t, w, map[string]any{"status": "pending"})
 			}
 		case "/async/compensate":
 			compCalled.Add(1)
-			w.WriteHeader(http.StatusOK)
+			writeSuccessEnvelope(t, w, nil)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -695,10 +708,10 @@ func TestStepRetry(t *testing.T) {
 				w.Write([]byte("temporary error"))
 			} else {
 				// Succeed on third try
-				json.NewEncoder(w).Encode(map[string]any{"result": "ok"})
+				writeSuccessEnvelope(t, w, map[string]any{"result": "ok"})
 			}
 		case "/retry/compensate":
-			w.WriteHeader(http.StatusOK)
+			writeSuccessEnvelope(t, w, nil)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

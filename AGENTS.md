@@ -247,6 +247,8 @@ examples/
 - `Config` 包含 `CredentialStore auth.CredentialStore`，用于给步骤出站请求执行可选 AK/SK 签名
 - `Config` 还包含可选 `Logger logger.Logger`；未显式注入时，`saga` 运行时日志默认走 `logger.Platform()`，并在后台协调/轮询路径上优先从事务 payload 的 `_trace_id`、`_span_id` 重建 trace 上下文
 - `Step` 当前包含 `AuthAK string` 字段；当非空时，执行器会通过 `CredentialStore` 查凭证并对请求进行 `NSP-HMAC-SHA256` 签名
+- `Action`、`Compensate`、`Poll` 三类 HTTP 子事务当前统一要求响应满足 `HTTP 2xx`、body 非空、body 为 JSON object 且顶层 `code` 字段字符串化后等于 `"0"`；否则视为失败
+- `Poll` 在通过上述响应封套校验后，仍需继续使用 `PollSuccessPath` / `PollFailurePath` 判断异步步骤是成功、失败还是继续 `polling`
 - `Engine.Submit` 在配置了 `CredentialStore` 时，会对步骤中的 `AuthAK` 做 best-effort fail-fast 校验
 - `Engine.Query` 当前在事务不存在时返回可被 `errors.Is(err, saga.ErrTransactionNotFound)` 识别的错误
 - `SubmitAndWait` 只控制当前调用的提交与等待生命周期；Saga 事务自身超时仍由 `SagaBuilder.WithTimeout` / `SagaDefinition.TimeoutSec` 决定
